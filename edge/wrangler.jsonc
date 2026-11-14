@@ -1,0 +1,51 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "fyde-edge",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-03-01",
+  "routes": [
+    {
+      "pattern": "fyde.izbirakin.com",
+      "custom_domain": true
+    }
+  ],
+  "assets": {
+    "directory": "../web/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/ws/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "fyde-db",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "BLOBS",
+      "bucket_name": "fyde-blobs"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "USER_HUB",
+        "class_name": "UserRelayHub"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["UserRelayHub"]
+    }
+  ],
+  "vars": {
+    "PUBLIC_APP_URL": "https://fyde.izbirakin.com",
+    "EMAIL_FROM": "fyde. <hello@izbirakin.com>",
+    "REQUIRE_INVITE_CODE": "false"
+  }
+}
