@@ -1,0 +1,30 @@
+# Cloudflare Workers & Wrangler
+edge/node_modules/
+edge/.wrangler/
+edge/.dev.vars
+.wrangler/
+.dev.vars
+
+# Node / Web
+node_modules/
+web/node_modules/
+web/dist/
+
+# Python Relay Reference
+server/.venv/
+server/data/
+server/.pytest_cache/
+__pycache__/
+*.pyc
+
+# Swift / Xcode
+apple/.build/
+apple/.swiftpm/
+DerivedData/
+*.xcuserdata/
+*.xcworkspace/xcuserdata/
+
+# Secrets & OS
+.env
+.env.*
+.DS_Store
