@@ -21,8 +21,8 @@ __pycache__/
 apple/.build/
 apple/.swiftpm/
 DerivedData/
+**/xcuserdata/
 *.xcuserdata/
-*.xcworkspace/xcuserdata/
 
 # Secrets & OS
 .env
