@@ -79,6 +79,59 @@ final class RelayConnectionTests: XCTestCase {
         XCTAssertFalse(store.isRelayConnected)
         XCTAssertFalse(store.isSendingChat)
     }
+
+    @MainActor
+    func testAutomaticVexoVoiceStopSendsChatWithoutCancellingRequest() async throws {
+        RelayStub.state.reset()
+        let store = FydeStore(relayBaseURL: "https://relay.invalid", relaySession: client().session)
+        store.vexo.transportKind = .simulator
+        store.vexo.voiceListenDurationSec = 3
+        await store.vexo.connect()
+        defer { store.vexo.disconnect() }
+
+        let sendVoice = try XCTUnwrap(store.vexo.onVoiceCommandReady)
+        let completed = expectation(description: "Automatic voice stop finishes the chat request")
+        store.vexo.onVoiceCommandReady = { prompt in
+            XCTAssertFalse(Task.isCancelled, "Stopping the microphone must not cancel transcription or chat")
+            await sendVoice(prompt)
+            completed.fulfill()
+        }
+
+        await store.vexo.simulateGesture(.doubleTap)
+        XCTAssertTrue(store.vexo.isListeningVoice)
+        store.vexo.liveTranscript = "Find my rafting photos"
+        await fulfillment(of: [completed], timeout: 20)
+
+        XCTAssertFalse(store.vexo.isListeningVoice)
+        XCTAssertFalse(store.vexo.isMicLockedLED)
+        XCTAssertTrue(store.isRelayConnected)
+        XCTAssertFalse(store.isSendingChat)
+        XCTAssertEqual(store.chatMessages.map(\.text), ["Find my rafting photos", "No matching photos found."])
+        XCTAssertEqual(RelayStub.state.chatBodies.count, 1)
+        let data = try XCTUnwrap(RelayStub.state.chatBodies.first)
+        let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(payload["source"] as? String, "vexo")
+        XCTAssertEqual(payload["text"] as? String, "Find my rafting photos")
+        XCTAssertEqual(payload["user_id"] as? String, store.currentUserId)
+    }
+
+    @MainActor
+    func testSubmittingSimulatedVoiceStopsCaptureAndCancelsPendingAutoSend() async throws {
+        RelayStub.state.reset()
+        let store = FydeStore(relayBaseURL: "https://relay.invalid", relaySession: client().session)
+        store.vexo.transportKind = .simulator
+        store.vexo.voiceListenDurationSec = 3
+        await store.vexo.connect()
+        defer { store.vexo.disconnect() }
+
+        await store.vexo.simulateGesture(.doubleTap)
+        await store.vexo.simulateSpokenCommand("Find my rafting photos")
+        XCTAssertFalse(store.vexo.isListeningVoice)
+        XCTAssertFalse(store.vexo.isMicLockedLED)
+        XCTAssertEqual(store.chatMessages.last?.text, "No matching photos found.")
+        try await Task.sleep(for: .milliseconds(3300))
+        XCTAssertEqual(RelayStub.state.chatBodies.count, 1)
+    }
 }
 
 private final class RelayStub: URLProtocol, @unchecked Sendable {
@@ -93,6 +146,13 @@ private final class RelayStub: URLProtocol, @unchecked Sendable {
 
         var requestCount: Int { lock.withLock { requests.count } }
         var bodies: [Data?] { lock.withLock { requestBodies } }
+        var chatBodies: [Data] {
+            lock.withLock {
+                zip(requests, requestBodies).compactMap { request, body -> Data? in
+                    request.httpMethod == "POST" && request.url?.path == "/api/chat" ? body : nil
+                }
+            }
+        }
 
         func reset(status: Int = 200, body: String = "", failures: [URLError.Code] = [], badDirectory: Bool = false) {
             lock.withLock {
@@ -118,7 +178,7 @@ private final class RelayStub: URLProtocol, @unchecked Sendable {
                 }
                 if request.httpMethod == "POST", request.url?.path == "/api/chat" {
                     let reply = body.isEmpty
-                        ? "{\"id\":\"reply\",\"user_id\":\"mehmet\",\"role\":\"assistant\",\"text\":\"No matching photos found.\",\"created_at\":\"2026-11-15T01:00:00Z\"}"
+                        ? "{\"id\":\"reply\",\"user_id\":\"mehmet\",\"role\":\"assistant\",\"text\":\"No matching photos found.\",\"created_at\":\"\(ISO8601DateFormatter().string(from: Date()))\"}"
                         : body
                     return (status, Data(reply.utf8))
                 }
