@@ -528,6 +528,7 @@ public final class VexoBandManager {
             activeStreams.insert(.audio)
             statusMessage = "\(VexoDeepgramClient.privacyNotice)"
             logGesture("Mic On (Blue LED)", detail: "Listening on pretend band \(bandName)…")
+            scheduleVoiceAutoStop()
             return
         }
 
@@ -555,11 +556,18 @@ public final class VexoBandManager {
         statusMessage = VexoDeepgramClient.privacyNotice
         logGesture("Mic On (Solid Blue LED)", detail: "Streaming Opus 16kHz -> Deepgram Nova-3")
 
+        scheduleVoiceAutoStop()
+    }
+
+    private func scheduleVoiceAutoStop() {
         let maxSecs = UInt64(max(3, min(voiceListenDurationSec, 30)))
         voiceAutoStopTask?.cancel()
         voiceAutoStopTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: maxSecs * 1_000_000_000)
             guard let self, !Task.isCancelled, self.isListeningVoice else { return }
+            // stopVoiceListeningAndDispatch cancels any pending timer. This timer
+            // has fired, so release it before stopping to keep transcription and chat alive.
+            self.voiceAutoStopTask = nil
             await self.stopVoiceListeningAndDispatch(submit: self.voiceAutoSendToChat)
         }
     }
@@ -644,6 +652,10 @@ public final class VexoBandManager {
     public func simulateSpokenCommand(_ phrase: String) async {
         liveTranscript = phrase
         logGesture("Sim Voice (\(bandName))", detail: "\"\(phrase)\"")
+        if transportKind == .simulator, isListeningVoice {
+            await stopVoiceListeningAndDispatch(submit: true)
+            return
+        }
         statusMessage = "Vexo #\(bandNumber) → Fyde Chat: \"\(phrase)\""
         await onVoiceCommandReady?(phrase)
     }
