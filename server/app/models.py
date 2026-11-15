@@ -186,6 +186,8 @@ class ChatMessage(BaseModel):
     user_id: str
     role: Literal["user", "assistant", "system"]
     text: str
+    source: str | None = None
+    client_message_id: str | None = None
     action_card: ChatActionCard | None = None
     created_at: str
 
@@ -245,5 +247,7 @@ class AcceptBundleRequest(BaseModel):
 class ChatTurnRequest(BaseModel):
     user_id: str
     text: str
-    platform: PlatformType = "ios"
+    platform: Literal["ios", "macos", "web", "vexo-band-69"] = "ios"
+    source: str | None = None
+    client_message_id: str | None = None
     auto_send: bool = True

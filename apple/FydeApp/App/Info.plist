@@ -19,28 +19,43 @@
 	<key>CFBundleShortVersionString</key>
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>LSMinimumSystemVersion</key>
 	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Fyde on macOS sends background iMessages through Messages.app when requested.</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Fyde connects over Bluetooth Low Energy to your Vexo Open wristband (Vexo-HACK-69) for hands-free voice commands, tap approvals, and transfer LED alerts.</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>Fyde communicates over Bluetooth Low Energy with your Vexo Open wristband (Vexo-HACK-69).</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Fyde saves incoming photos and videos from your trusted contacts directly into Apple Photos.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Fyde indexes your photos and videos locally with multimodal embeddings and saves shared albums directly into Photos.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
 		<true/>
 	</dict>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>bluetooth-central</string>
+	</array>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
 	<key>UILaunchScreen</key>
 	<dict/>
-	<key>NSPhotoLibraryUsageDescription</key>
-	<string>Fyde indexes your photos and videos locally with multimodal embeddings and saves shared albums directly into Photos.</string>
-	<key>NSPhotoLibraryAddUsageDescription</key>
-	<string>Fyde saves incoming photos and videos from your trusted contacts directly into Apple Photos.</string>
-	<key>NSAppleEventsUsageDescription</key>
-	<string>Fyde on macOS sends background iMessages through Messages.app when requested.</string>
-	<key>NSAppTransportSecurity</key>
-	<dict>
-		<key>NSAllowsArbitraryLoads</key>
-		<true/>
-		<key>NSAllowsLocalNetworking</key>
-		<true/>
-	</dict>
 </dict>
 </plist>

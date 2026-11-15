@@ -1,9 +1,11 @@
 import SwiftUI
 
 public struct FydeRootView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @Bindable var store: FydeStore
     @State private var showSettings = false
     @State private var showBilling = false
+    @State private var showVexoFromSettings = false
 
     public init(store: FydeStore) {
         self.store = store
@@ -14,74 +16,68 @@ public struct FydeRootView: View {
             if !store.isAuthenticated {
                 FydeAuthGateView(store: store)
             } else {
-                ZStack(alignment: .top) {
-                    TabView(selection: $store.selectedTab) {
-                        // LEFT TAB: Multimodal Search
+                TabView(selection: $store.selectedTab) {
+                    Tab("Search", systemImage: "magnifyingglass", value: FydeTab.search) {
                         SearchTabView(store: store, onOpenSettings: { showSettings = true })
-                            .tabItem {
-                                Label("Search", systemImage: "magnifyingglass")
-                            }
-                            .tag(FydeTab.search)
-
-                        // MIDDLE TAB (DEFAULT LANDING): fyde. Chat & Permissions
-                        ChatTabView(store: store, onOpenSettings: { showSettings = true })
-                            .tabItem {
-                                Label("fyde. Chat", systemImage: "bubble.left.and.bubble.right.fill")
-                            }
-                            .tag(FydeTab.chat)
-
-                        // RIGHT TAB: Received & Approvals
-                        ReceivedTabView(store: store, onOpenSettings: { showSettings = true })
-                            .tabItem {
-                                Label("Received", systemImage: "tray.and.arrow.down.fill")
-                            }
-                            .badge(store.unreadReceivedBadgeCount)
-                            .tag(FydeTab.received)
                     }
-                    .tint(FydeBrand.terracotta)
 
+                    Tab("Chat", systemImage: "bubble.left.and.bubble.right.fill", value: FydeTab.chat) {
+                        ChatTabView(store: store, onOpenSettings: { showSettings = true })
+                    }
+
+                    Tab("Received", systemImage: "tray.and.arrow.down.fill", value: FydeTab.received) {
+                        ReceivedTabView(store: store, onOpenSettings: { showSettings = true })
+                    }
+                    .badge(store.unreadReceivedBadgeCount)
+                }
+                .tint(FydeTheme.accent)
+                .overlay(alignment: .top) {
                     if let banner = store.statusBanner {
-                        HStack(spacing: 10) {
-                            Circle()
-                                .fill(FydeBrand.terracotta)
-                                .frame(width: 8, height: 8)
-                            Text(banner)
-                                .font(.footnote.weight(.medium))
-                                .lineLimit(2)
-                            Spacer(minLength: 4)
-                            Button {
-                                store.statusBanner = nil
-                            } label: {
-                                Image(systemName: "xmark")
-                                    .font(.caption.bold())
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 10)
-                        .background(.ultraThinMaterial, in: Capsule())
-                        .shadow(radius: 6)
-                        .padding(.horizontal, 16)
-                        .padding(.top, 8)
-                        .transition(.move(edge: .top).combined(with: .opacity))
+                        FydeToast(text: banner) { store.statusBanner = nil }
+                            .padding(.top, 4)
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                    }
+                }
+                .task(id: store.statusBanner) {
+                    guard store.statusBanner != nil else { return }
+                    try? await Task.sleep(for: .seconds(5))
+                    if !Task.isCancelled {
+                        store.statusBanner = nil
                     }
                 }
             }
         }
-        .animation(.spring(duration: 0.3), value: store.statusBanner)
+        .animation(.spring(duration: 0.35), value: store.statusBanner)
         .task {
             await store.bootstrap()
         }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                Task { await store.resumeFromBackground() }
+            }
+        }
         .sheet(isPresented: $showSettings) {
-            FydeSettingsSheet(store: store, onOpenBilling: {
-                showSettings = false
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-                    showBilling = true
+            FydeSettingsSheet(
+                store: store,
+                onOpenBilling: {
+                    showSettings = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                        showBilling = true
+                    }
+                },
+                onOpenVexo: {
+                    showSettings = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                        showVexoFromSettings = true
+                    }
                 }
-            })
+            )
         }
         .sheet(isPresented: $showBilling) {
             FydeBillingSheetView(store: store)
+        }
+        .sheet(isPresented: $showVexoFromSettings) {
+            VexoBandSheetView(store: store)
         }
     }
 }
@@ -89,6 +85,7 @@ public struct FydeRootView: View {
 struct FydeSettingsSheet: View {
     @Bindable var store: FydeStore
     var onOpenBilling: () -> Void
+    var onOpenVexo: () -> Void
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -105,15 +102,6 @@ struct FydeSettingsSheet: View {
                             .foregroundStyle(FydeBrand.terracotta)
                     }
 
-                    Picker("Quick Switch Peer (Test P2P)", selection: Binding(
-                        get: { store.currentUserId },
-                        set: { newId in Task { await store.switchUser(to: newId) } }
-                    )) {
-                        ForEach(store.users) { u in
-                            Text("\(u.displayName) (@\(u.handle))").tag(u.id)
-                        }
-                    }
-
                     Button(role: .destructive) {
                         Task {
                             await store.signOut()
@@ -124,27 +112,12 @@ struct FydeSettingsSheet: View {
                     }
                 }
 
-                Section("Cloudflare Edge Relay (fyde.izbirakin.com)") {
-                    TextField("Edge URL", text: $store.relayBaseURL)
-                        .autocorrectionDisabled()
-                    HStack(spacing: 10) {
-                        Button("Use Local (:8787)") {
-                            store.relayBaseURL = "http://127.0.0.1:8787"
-                            Task { await store.bootstrap() }
-                        }
-                        .font(.caption.weight(.semibold))
-
-                        Button("Use fyde.izbirakin.com") {
-                            store.relayBaseURL = "https://fyde.izbirakin.com"
-                            Task { await store.bootstrap() }
-                        }
-                        .font(.caption.weight(.semibold))
-                    }
+                Section("Cloudflare Edge") {
                     HStack {
                         Circle()
-                            .fill(store.isRelayConnected ? Color.green : FydeBrand.terracotta)
+                            .fill(store.isRelayConnected ? FydeTheme.success : FydeBrand.terracotta)
                             .frame(width: 8, height: 8)
-                        Text(store.isRelayConnected ? "Connected to Cloudflare Edge" : "Offline Local Mode")
+                        Text(store.isRelayConnected ? "Connected" : "Offline")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         Spacer()
@@ -160,6 +133,21 @@ struct FydeSettingsSheet: View {
                         .font(.caption)
                 }
 
+                Section("Vexo Open Wristband (Vexo-HACK-69)") {
+                    HStack {
+                        Circle()
+                            .fill(store.vexo.isConnected ? FydeTheme.success : FydeTheme.muted)
+                            .frame(width: 8, height: 8)
+                        Text(store.vexo.isConnected ? "Connected to \(store.vexo.bandName)" : "\(store.vexo.bandName) Disconnected")
+                            .font(.caption)
+                        Spacer()
+                        Button("Configure Vexo #\(store.vexo.bandNumber)…") {
+                            onOpenVexo()
+                        }
+                        .font(.caption.bold())
+                    }
+                }
+
                 #if os(macOS)
                 Section("macOS Background iMessage Bridge") {
                     Toggle("Enable Live Messages.app Automation", isOn: $store.enableLiveMacOSMessagesBridge)
@@ -169,7 +157,10 @@ struct FydeSettingsSheet: View {
                 }
                 #endif
             }
-            .navigationTitle("fyde. Settings")
+            .scrollContentBackground(.hidden)
+            .background(FydeTheme.paper)
+            .tint(FydeTheme.accent)
+            .navigationTitle("Settings")
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }

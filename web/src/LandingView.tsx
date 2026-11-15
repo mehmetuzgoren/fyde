@@ -1,230 +1,449 @@
-import React, { useEffect, useState } from "react";
-import type { PlanDefinition, PlanTier, UserProfile, WaitlistEntry } from "./types";
+import React, { useEffect, useRef, useState } from "react";
+import { saveLocalWaitlistEntry } from "./mockFallback";
+import type { UserProfile, WaitlistEntry } from "./types";
 
 interface LandingViewProps {
   resolveUrl: (rel: string) => string;
-  plans: PlanDefinition[];
   authenticatedUser: UserProfile | null;
-  onOpenLogin: (pendingPlan?: { tier: PlanTier; interval: "monthly" | "yearly" }) => void;
+  onOpenLogin: () => void;
+  onOpenSignup: () => void;
   onEnterApp: () => void;
-  onSelectPlanWhileAuthed: (tier: PlanTier, interval: "monthly" | "yearly") => void;
+}
+
+interface DemoExchange {
+  id: string;
+  label: string;
+  prompt: string;
+  status: string;
+  file: string;
+  detail: string;
+  videoStamp?: string;
+}
+
+const PRESET_EXCHANGES: DemoExchange[] = [
+  {
+    id: "surf",
+    label: "01 Pacifica video",
+    prompt: "iMessage Maya the Pacifica surf wipeout",
+    status: "SENT VIA MESSAGES",
+    file: "Pacifica_Sunset_4K.mp4",
+    detail: "Matched visual moment at 00:14 · “Wave wipeout”",
+    videoStamp: "00:14 / 01:12",
+  },
+  {
+    id: "china",
+    label: "02 China trip",
+    prompt: "Let Alex access all our China trip photos with him",
+    status: "SMART ACCESS GRANTED",
+    file: "48 photos & videos · Shanghai, Beijing",
+    detail: "Shared dynamically with @alex",
+  },
+  {
+    id: "passport",
+    label: "03 Passports",
+    prompt: "Get our passport scans from Mehmet's files",
+    status: "PULLED AUTOMATICALLY",
+    file: "Family_Passport_Scans.pdf",
+    detail: "Delivered via trusted partner access · 1.8 MB original",
+  },
+];
+
+const DEMO_SEARCH_ITEMS = [
+  {
+    id: "s1",
+    title: "Pacifica_Sunset_4K.mp4",
+    meta: "Pacifica, CA · Maya, Mehmet",
+    badge: "00:14",
+    keywords: "surf wipeout wave pacifica video beach",
+  },
+  {
+    id: "s2",
+    title: "Shanghai_Bund_Rooftop.jpg",
+    meta: "Shanghai · Maya, Alex, Mehmet",
+    badge: "RAW",
+    keywords: "shanghai china trip rooftop night alex photo",
+  },
+  {
+    id: "s3",
+    title: "Family_Passport_Scans.pdf",
+    meta: "2 pages · Verified PDF",
+    badge: "PDF",
+    keywords: "passport scan travel document id mehmet maya",
+  },
+];
+
+function sanitizeHandle(raw: string): string {
+  return raw
+    .replace(/^@+/, "")
+    .replace(/[^a-zA-Z0-9._-]/g, "")
+    .toLowerCase()
+    .slice(0, 24);
 }
 
 export function LandingView({
   resolveUrl,
-  plans,
   authenticatedUser,
   onOpenLogin,
+  onOpenSignup,
   onEnterApp,
-  onSelectPlanWhileAuthed,
 }: LandingViewProps) {
-  const [waitlistCount, setWaitlistCount] = useState<number>(340);
+  const [wlHandle, setWlHandle] = useState<string>("");
+  const [emailStepOpen, setEmailStepOpen] = useState<boolean>(false);
   const [wlEmail, setWlEmail] = useState<string>("");
-  const [wlName, setWlName] = useState<string>("");
-  const [wlPlatform, setWlPlatform] = useState<string>("ios_macos");
   const [wlSubmitting, setWlSubmitting] = useState<boolean>(false);
-  const [wlResult, setWlResult] = useState<{ message: string; entry: WaitlistEntry } | null>(null);
+  const [wlResult, setWlResult] = useState<{ alreadyJoined: boolean; entry: WaitlistEntry } | null>(null);
   const [wlError, setWlError] = useState<string | null>(null);
+  const [copiedCode, setCopiedCode] = useState<boolean>(false);
 
-  const [billingInterval, setBillingInterval] = useState<"monthly" | "yearly">("yearly");
+  const handleInputRef = useRef<HTMLInputElement | null>(null);
+  const emailInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Interactive right-hand product preview state
   const [previewTab, setPreviewTab] = useState<"search" | "chat" | "received">("chat");
+  const [activeExchange, setActiveExchange] = useState<DemoExchange>(PRESET_EXCHANGES[0]);
+  const [customDraft, setCustomDraft] = useState<string>("");
+  const [demoSearchQuery, setDemoSearchQuery] = useState<string>("surf wipeout");
+  const [savedToPhotos, setSavedToPhotos] = useState<boolean>(false);
 
   useEffect(() => {
-    fetch(resolveUrl("/api/waitlist/stats"))
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => {
-        if (d?.total_waitlist) setWaitlistCount(Number(d.total_waitlist));
-      })
-      .catch(() => {});
-  }, [resolveUrl]);
+    if (!emailStepOpen) return;
+    const timer = window.setTimeout(() => {
+      emailInputRef.current?.focus();
+    }, 30);
+    return () => window.clearTimeout(timer);
+  }, [emailStepOpen]);
+
+  const cleanHandle = sanitizeHandle(wlHandle);
+  const reservedHandle = sanitizeHandle(wlResult?.entry?.name || cleanHandle);
+
+  function handleRevealEmailStep(e: React.FormEvent) {
+    e.preventDefault();
+    setWlError(null);
+
+    if (!cleanHandle) {
+      setWlError("Choose a handle first.");
+      handleInputRef.current?.focus();
+      return;
+    }
+    if (cleanHandle.length < 2) {
+      setWlError("Handles must be at least 2 characters.");
+      handleInputRef.current?.focus();
+      return;
+    }
+
+    setEmailStepOpen(true);
+  }
 
   async function submitWaitlist(e: React.FormEvent) {
     e.preventDefault();
     setWlError(null);
+
+    if (!cleanHandle || cleanHandle.length < 2) {
+      setWlError("Handles must be at least 2 characters.");
+      handleInputRef.current?.focus();
+      return;
+    }
+
+    const trimmedEmail = wlEmail.trim();
+    if (!trimmedEmail || !trimmedEmail.includes("@")) {
+      setWlError("Enter a valid email address.");
+      emailInputRef.current?.focus();
+      return;
+    }
+
     setWlSubmitting(true);
     try {
       const res = await fetch(resolveUrl("/api/waitlist"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          email: wlEmail,
-          name: wlName,
-          platform_interest: wlPlatform,
+          email: trimmedEmail,
+          name: cleanHandle,
+          platform_interest: "ios_macos",
         }),
       });
-      const data = await res.json();
-      if (!res.ok) {
-        setWlError(data.error || "Could not join waitlist.");
+      if (res.ok) {
+        const data = await res.json();
+        setWlResult({ alreadyJoined: Boolean(data.already_joined), entry: data.entry });
         return;
       }
-      setWlResult({ message: data.message, entry: data.entry });
-      if (!data.already_joined) setWaitlistCount((c) => c + 1);
+      const errData = await res.json().catch(() => null);
+      if (errData?.error) {
+        setWlError(errData.error);
+        return;
+      }
+      const fallback = saveLocalWaitlistEntry(trimmedEmail, cleanHandle, "ios_macos");
+      setWlResult({ alreadyJoined: fallback.already_joined, entry: fallback.entry });
     } catch {
-      setWlError("Could not reach fyde.izbirakin.com waitlist edge.");
+      const fallback = saveLocalWaitlistEntry(trimmedEmail, cleanHandle, "ios_macos");
+      setWlResult({ alreadyJoined: fallback.already_joined, entry: fallback.entry });
     } finally {
       setWlSubmitting(false);
     }
   }
 
-  function handlePlanCta(tier: PlanTier) {
-    if (tier === "starter") {
-      if (authenticatedUser) onEnterApp();
-      else onOpenLogin();
-      return;
-    }
-    if (authenticatedUser) {
-      onSelectPlanWhileAuthed(tier, billingInterval);
-    } else {
-      onOpenLogin({ tier, interval: billingInterval });
-    }
+  function handleCopyInvite(code: string) {
+    navigator.clipboard?.writeText(code).catch(() => {});
+    setCopiedCode(true);
+    setTimeout(() => setCopiedCode(false), 2000);
   }
+
+  function focusHandleBar() {
+    document.getElementById("waitlist")?.scrollIntoView({ behavior: "smooth", block: "center" });
+    window.setTimeout(() => handleInputRef.current?.focus(), 180);
+  }
+
+  function handleCustomDemoSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    const text = customDraft.trim();
+    if (!text) return;
+    setActiveExchange({
+      id: "custom",
+      label: "Custom",
+      prompt: text,
+      status: "MATCHED & QUEUED",
+      file: "3 matching originals",
+      detail: `Indexed locally and ready to send for “${text}”`,
+    });
+    setCustomDraft("");
+  }
+
+  const filteredDemoSearch = DEMO_SEARCH_ITEMS.filter((item) => {
+    const q = demoSearchQuery.trim().toLowerCase();
+    if (!q) return true;
+    return (
+      item.title.toLowerCase().includes(q) ||
+      item.meta.toLowerCase().includes(q) ||
+      item.keywords.includes(q)
+    );
+  });
 
   return (
     <div className="landing-root">
-      {/* Top Editorial Navigation */}
-      <nav className="landing-nav">
+      {/* Top Bar: Clean Wordmark Left, Login Top-Right */}
+      <header className="landing-nav">
         <div className="landing-nav-inner">
-          <a href="#top" className="brand-lockup">
+          <a href="#top" className="brand-lockup" aria-label="fyde. home">
             <img src="/logo.png" alt="fyde." className="brand-logo-img" />
-            <span className="domain-tag">fyde.izbirakin.com</span>
           </a>
-
-          <div className="nav-links">
-            <a href="#how-it-works">3-Tab Workflow</a>
-            <a href="#permissions">Smart Trust</a>
-            <a href="#edge">Cloudflare Edge</a>
-            <a href="#pricing">Pricing</a>
-          </div>
 
           <div className="nav-actions">
             {authenticatedUser ? (
               <>
-                <span style={{ fontSize: "0.82rem", color: "var(--muted)" }}>
-                  Signed in as <strong>@{authenticatedUser.handle}</strong>
+                <span className="mono" style={{ fontSize: "0.8rem", color: "var(--muted)" }}>
+                  @{authenticatedUser.handle}
                 </span>
-                <button className="btn btn-forest" onClick={onEnterApp}>
-                  Open fyde. App →
+                <button type="button" className="login-top-btn" onClick={onEnterApp}>
+                  <span>Open app</span>
+                  <span aria-hidden="true">→</span>
                 </button>
               </>
             ) : (
               <>
-                <button className="btn btn-outline" onClick={() => onOpenLogin()}>
-                  Log in
+                <button type="button" className="login-top-btn ghost" onClick={onOpenLogin}>
+                  <span>Log in</span>
                 </button>
-                <a className="btn btn-terracotta" href="#waitlist">
-                  Join Waitlist
-                </a>
+                <button type="button" className="login-top-btn" onClick={onOpenSignup}>
+                  <span>Sign up</span>
+                </button>
               </>
             )}
           </div>
         </div>
-      </nav>
+      </header>
 
-      {/* Hero + Waitlist Section */}
+      {/* Main Split Stage */}
       <section id="top" className="hero-section">
         <div>
-          <div className="eyebrow-pill">
-            <span className="terracotta-dot" />
-            <span>iPhone First • macOS & Web • EmbeddingGemma 2 Multimodal</span>
-          </div>
-
           <h1 className="hero-title">
-            Search by memory<span className="accent-dot">.</span>
+            Find it by memory<span className="accent-dot">.</span>
             <br />
-            Share in a sentence<span className="accent-dot">.</span>
+            Send it in a sentence<span className="accent-dot">.</span>
           </h1>
 
           <p className="hero-subtitle">
-            <strong>fyde.</strong> indexes your photos, exact video timestamps, and PDFs privately on-device—letting you
-            send anything over <strong>Direct Fyde</strong>, <strong>iMessage</strong>, or <strong>Email</strong> from a
-            single chat, or grant trusted contacts folderless access so they can pull what they need themselves.
+            Ask for “China trip photos with Alex” or “the surfing wipeout in Pacifica.”{" "}
+            <strong>fyde.</strong> locates the exact photo, PDF, or second inside a video and sends the original over
+            Fyde, iMessage, or email.
           </p>
 
-          {/* Waitlist Box */}
-          <div id="waitlist" className="waitlist-card">
+          {/* Two-Step Inline Handle Reservation -> Email Waitlist */}
+          <div id="waitlist" className="waitlist-box">
             {!wlResult ? (
-              <form onSubmit={submitWaitlist}>
-                <div style={{ fontWeight: 700, fontSize: "0.98rem", marginBottom: 10 }}>
-                  Reserve your handle & early access invite
-                </div>
-                <div className="waitlist-form-row" style={{ marginBottom: 10 }}>
+              <form onSubmit={emailStepOpen ? submitWaitlist : handleRevealEmailStep} noValidate>
+                <label htmlFor="reserve-handle-input" className="reserve-label">
+                  Reserve your handle
+                </label>
+
+                <div className="handle-bar">
+                  <span className="handle-bar-prefix" aria-hidden="true">
+                    @
+                  </span>
                   <input
-                    className="field"
-                    style={{ flex: "1 1 210px" }}
-                    type="email"
-                    placeholder="Enter your email address…"
-                    value={wlEmail}
-                    onChange={(e) => setWlEmail(e.target.value)}
-                    required
+                    id="reserve-handle-input"
+                    ref={handleInputRef}
+                    className="handle-bar-input"
+                    type="text"
+                    placeholder="yourhandle"
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
+                    value={wlHandle}
+                    onChange={(e) => {
+                      setWlHandle(sanitizeHandle(e.target.value));
+                      if (wlError) setWlError(null);
+                    }}
+                    onKeyDown={(e) => {
+                      if (!emailStepOpen && e.key === "Tab" && !e.shiftKey && cleanHandle.length >= 2) {
+                        e.preventDefault();
+                        setEmailStepOpen(true);
+                        return;
+                      }
+                      if (emailStepOpen && e.key === "Enter") {
+                        e.preventDefault();
+                        emailInputRef.current?.focus();
+                      }
+                    }}
                   />
-                  <input
-                    className="field"
-                    style={{ flex: "0.8 1 140px" }}
-                    placeholder="First name (optional)"
-                    value={wlName}
-                    onChange={(e) => setWlName(e.target.value)}
-                  />
+                  {!emailStepOpen ? (
+                    <button className="waitlist-submit-btn" type="submit">
+                      Reserve handle
+                    </button>
+                  ) : (
+                    <span className="handle-status-tag">
+                      <span style={{ color: "var(--orange)" }}>✓</span>
+                      <span>Holding</span>
+                    </span>
+                  )}
                 </div>
-                <div className="waitlist-form-row">
-                  <select
-                    className="field"
-                    style={{ flex: "1 1 170px" }}
-                    value={wlPlatform}
-                    onChange={(e) => setWlPlatform(e.target.value)}
-                  >
-                    <option value="ios_macos">iPhone + macOS + Web</option>
-                    <option value="ios_only">iPhone + iMessage</option>
-                    <option value="web_macos">macOS + Web</option>
-                  </select>
-                  <button className="btn btn-terracotta" style={{ flex: "1 1 180px" }} type="submit" disabled={wlSubmitting}>
-                    {wlSubmitting ? "Reserving…" : "Join the Waitlist →"}
-                  </button>
-                </div>
+
+                {emailStepOpen && (
+                  <div className="email-step-wrap">
+                    <p className="email-step-caption">
+                      Enter your email to lock{" "}
+                      <strong className="mono" style={{ color: "var(--black)" }}>
+                        @{cleanHandle || "handle"}
+                      </strong>{" "}
+                      and join the waitlist.
+                    </p>
+
+                    <div className="email-bar">
+                      <input
+                        ref={emailInputRef}
+                        className="email-bar-input"
+                        type="email"
+                        placeholder="name@domain.com"
+                        value={wlEmail}
+                        onChange={(e) => {
+                          setWlEmail(e.target.value);
+                          if (wlError) setWlError(null);
+                        }}
+                        aria-label="Email address"
+                        required
+                      />
+                      <button className="waitlist-submit-btn" type="submit" disabled={wlSubmitting}>
+                        {wlSubmitting ? "Joining…" : "Join waitlist"}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
                 {wlError && (
-                  <div style={{ color: "var(--terracotta)", fontSize: "0.82rem", marginTop: 8 }}>{wlError}</div>
+                  <div style={{ color: "var(--orange)", fontWeight: 700, fontSize: "0.82rem", marginTop: 9 }}>
+                    {wlError}
+                  </div>
                 )}
               </form>
             ) : (
               <div>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-                  <span className="terracotta-dot" />
-                  <strong style={{ fontSize: "1.02rem" }}>{wlResult.message}</strong>
-                </div>
-                <div style={{ fontSize: "0.86rem", color: "var(--ink-soft)", lineHeight: 1.5 }}>
-                  Queue Spot: <strong>#{wlResult.entry.position}</strong> • Early Invite Token:{" "}
-                  <code>{wlResult.entry.invite_code}</code> • Referral Code:{" "}
-                  <strong>{wlResult.entry.referral_code}</strong>
+                <div className="pass-stub">
+                  <div className="pass-stub-left">
+                    <span className="mono" style={{ fontSize: "0.68rem", fontWeight: 700, letterSpacing: "0.08em" }}>
+                      QUEUE NO.
+                    </span>
+                    <span
+                      className="mono"
+                      style={{ fontSize: "1.75rem", fontWeight: 700, lineHeight: 1, letterSpacing: "-0.03em" }}
+                    >
+                      #{String(wlResult.entry.position).padStart(4, "0")}
+                    </span>
+                  </div>
+
+                  <div className="pass-stub-right">
+                    <div>
+                      <div
+                        className="mono"
+                        style={{ fontSize: "0.68rem", color: "#999999", letterSpacing: "0.08em" }}
+                      >
+                        {wlResult.alreadyJoined ? "ALREADY ON THE LIST" : "HANDLE RESERVED"}
+                      </div>
+                      <div className="mono" style={{ fontWeight: 700, fontSize: "0.96rem", marginTop: 3 }}>
+                        <span style={{ color: "var(--orange)" }}>@</span>
+                        {reservedHandle}
+                      </div>
+                      <div style={{ fontSize: "0.8rem", color: "#a3a3a3", marginTop: 2 }}>
+                        {wlResult.entry.email}
+                      </div>
+                    </div>
+
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: 10,
+                        flexWrap: "wrap",
+                      }}
+                    >
+                      <code style={{ fontSize: "0.78rem", color: "var(--orange)", fontWeight: 700 }}>
+                        {wlResult.entry.invite_code}
+                      </code>
+                      <div style={{ display: "flex", gap: 8 }}>
+                        <button
+                          type="button"
+                          className="plat-btn"
+                          style={{ background: "var(--white)", color: "var(--black)", borderColor: "var(--white)" }}
+                          onClick={() => handleCopyInvite(wlResult.entry.invite_code)}
+                        >
+                          {copiedCode ? "Copied" : "Copy pass"}
+                        </button>
+                        <button
+                          type="button"
+                          className="plat-btn"
+                          style={{ background: "transparent", color: "#bbbbbb", borderColor: "#333333" }}
+                          onClick={() => {
+                            setWlResult(null);
+                            setEmailStepOpen(false);
+                            setWlEmail("");
+                            setWlHandle("");
+                          }}
+                        >
+                          Reset
+                        </button>
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </div>
             )}
-
-            <div className="waitlist-meta">
-              <span>
-                <strong>{waitlistCount.toLocaleString()}</strong> people waiting for TestFlight & Mac Bridge
-              </span>
-              {!authenticatedUser && (
-                <button
-                  type="button"
-                  className="pill"
-                  onClick={() => onOpenLogin()}
-                >
-                  Have an account or testing? Log in →
-                </button>
-              )}
-            </div>
           </div>
         </div>
 
-        {/* Interactive 3-Tab Live Mockup Card */}
-        <div className="hero-device-card">
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <img src="/f-dot-mark.png" alt="f." style={{ height: 22 }} />
-              <span style={{ fontSize: "0.82rem", fontWeight: 700 }}>iPhone • Direct-to-Photos & P2P</span>
+        {/* Right Column: Clean Interactive Fyde Interface */}
+        <div className="demo-shell">
+          <div className="demo-topbar">
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <img src="/f-dot-mark-white.png" alt="f." style={{ height: 22 }} />
+              <span className="mono" style={{ fontSize: "0.74rem", color: "#a3a3a3" }}>
+                fyde. interactive preview
+              </span>
             </div>
-            <div className="segmented">
+
+            <div className="demo-tabs" role="tablist" aria-label="App tabs">
               <button
                 type="button"
+                role="tab"
+                aria-selected={previewTab === "search"}
                 className={previewTab === "search" ? "active" : ""}
                 onClick={() => setPreviewTab("search")}
               >
@@ -232,6 +451,8 @@ export function LandingView({
               </button>
               <button
                 type="button"
+                role="tab"
+                aria-selected={previewTab === "chat"}
                 className={previewTab === "chat" ? "active" : ""}
                 onClick={() => setPreviewTab("chat")}
               >
@@ -239,6 +460,8 @@ export function LandingView({
               </button>
               <button
                 type="button"
+                role="tab"
+                aria-selected={previewTab === "received"}
                 className={previewTab === "received" ? "active" : ""}
                 onClick={() => setPreviewTab("received")}
               >
@@ -247,228 +470,239 @@ export function LandingView({
             </div>
           </div>
 
-          {previewTab === "chat" && (
-            <>
-              <div className="preview-chat-bubble user">
-                Allow Alex to access all my China trip photos with him — no folder needed.
-              </div>
-              <div className="preview-chat-bubble fyde">
-                <strong>Smart Scope active for Alex</strong>
-                <div style={{ fontSize: "0.8rem", color: "var(--muted)", marginTop: 4 }}>
-                  Matched dynamically across Apple Photos: 📍 China, Shanghai • 👥 Alex • Photos & Videos.
-                </div>
-              </div>
-              <div className="preview-chat-bubble user">
-                Get our passport scans from Mehmet's files
-              </div>
-              <div className="preview-chat-bubble fyde">
-                <strong>Auto-pulled via Trusted Spouse Access</strong>
-                <div style={{ fontSize: "0.8rem", color: "var(--muted)", marginTop: 4 }}>
-                  Delivered <code>Family_Passport_Scans.pdf</code> over zero-egress R2 directly to Maya's Received tab.
-                </div>
-              </div>
-            </>
-          )}
-
-          {previewTab === "search" && (
-            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              <div className="field" style={{ fontSize: "0.84rem", background: "var(--surface-tint)" }}>
-                🔍 “surfing wipeout wave in Pacifica”
-              </div>
-              <div className="preview-chat-bubble fyde">
-                <div style={{ display: "flex", justifyContent: "space-between" }}>
-                  <strong>Pacifica Surfing Session (4K)</strong>
-                  <span className="pill terracotta">▶ 0:14s</span>
-                </div>
-                <div style={{ fontSize: "0.8rem", color: "var(--muted)", marginTop: 4 }}>
-                  Matched keyframe embedding @ 14.0s — “Big wave wipeout & laugh” • Streamed via R2 Range
-                </div>
-              </div>
-              <div className="preview-chat-bubble fyde">
-                <strong>Shanghai Bund Night Skyline</strong>
-                <div style={{ fontSize: "0.8rem", color: "var(--muted)", marginTop: 4 }}>
-                  📍 Shanghai, China • 👥 Mehmet, Maya, Alex
-                </div>
-              </div>
-            </div>
-          )}
-
-          {previewTab === "received" && (
-            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              <div className="preview-chat-bubble fyde">
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <strong>China Trip Highlights (4 Photos)</strong>
-                  <span className="pill terracotta">Direct Fyde</span>
-                </div>
-                <div style={{ fontSize: "0.8rem", color: "var(--muted)", margin: "6px 0 10px" }}>
-                  AirDrop-style PhotoKit integration saves directly into your iPhone Camera Roll & album.
-                </div>
-                <div style={{ display: "flex", gap: 8 }}>
-                  <span className="pill primary">Save to Apple Photos</span>
-                  <span className="pill">Save to Files</span>
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-      </section>
-
-      {/* 3-Tab Architecture & Smart Permissions */}
-      <section id="how-it-works" className="section-wrap">
-        <div className="section-header">
-          <span className="eyebrow-pill">Three Tabs. Zero Friction.</span>
-          <h2>Designed around how families and close teams actually share.</h2>
-        </div>
-
-        <div id="permissions" className="feature-grid-3">
-          <div className="editorial-card">
-            <span className="pill terracotta" style={{ alignSelf: "flex-start" }}>Left Tab • Search</span>
-            <h3 style={{ margin: "6px 0 4px" }}>Multimodal Video, Photo & PDF Recall</h3>
-            <p style={{ margin: 0, color: "var(--ink-soft)", fontSize: "0.9rem", lineHeight: 1.55 }}>
-              Powered by 256-D Matryoshka embeddings (EmbeddingGemma 2 + Apple Vision OCR & Neural Engine). Search a
-              spoken phrase or visual moment and jump straight to the exact second inside a video.
-            </p>
-          </div>
-
-          <div className="editorial-card">
-            <span className="pill primary" style={{ alignSelf: "flex-start" }}>Middle Tab • Fyde Chat</span>
-            <h3 style={{ margin: "6px 0 4px" }}>Send & Set Permissions in Plain English</h3>
-            <p style={{ margin: 0, color: "var(--ink-soft)", fontSize: "0.9rem", lineHeight: 1.55 }}>
-              Land directly in Chat. Send automatically in the background over <strong>Direct Fyde</strong>,{" "}
-              <strong>iMessage</strong> (via macOS Messages bridge), or <strong>Email</strong>—and grant{" "}
-              <strong>Trusted Spouse</strong> or <strong>Folderless Smart Scopes</strong> inline.
-            </p>
-          </div>
-
-          <div className="editorial-card">
-            <span className="pill terracotta" style={{ alignSelf: "flex-start" }}>Right Tab • Received</span>
-            <h3 style={{ margin: "6px 0 4px" }}>AirDrop-Like Direct-to-Photos</h3>
-            <p style={{ margin: 0, color: "var(--ink-soft)", fontSize: "0.9rem", lineHeight: 1.55 }}>
-              Incoming Direct Fyde bundles land in Received and save straight into your iPhone or Mac{" "}
-              <code>PHPhotoLibrary</code> album—or accept them hands-free right from Fyde Chat.
-            </p>
-          </div>
-        </div>
-      </section>
-
-      {/* Cloudflare Edge Architecture */}
-      <section id="edge" className="section-wrap" style={{ paddingTop: 12 }}>
-        <div className="editorial-card" style={{ padding: 32, background: "var(--surface-warm)" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 20, alignItems: "center" }}>
-            <div style={{ maxWidth: 640 }}>
-              <span className="eyebrow-pill">Global Edge Infrastructure</span>
-              <h2 style={{ margin: "12px 0 8px", letterSpacing: "-0.02em" }}>
-                Built on Cloudflare Workers, Hibernating Durable Objects & Zero-Egress R2.
-              </h2>
-              <p style={{ margin: 0, color: "var(--ink-soft)", lineHeight: 1.6, fontSize: "0.93rem" }}>
-                Every device maintains a near-zero-cost hibernating WebSocket on Cloudflare's global edge, backed by D1
-                permission ledgers and encrypted zero-egress R2 transfer relays—so 4K family videos and PDFs transfer
-                instantaneously across continents without bandwidth fees.
-              </p>
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 8, minWidth: 230 }}>
-              <div className="pill">⚡ Durable Object WebSocket Hibernation</div>
-              <div className="pill">🪣 Cloudflare R2 ($0 Egress Video Streaming)</div>
-              <div className="pill">🔐 Web Crypto PBKDF2 + Apple JWKS + D1</div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      {/* Pricing & Payment Options */}
-      <section id="pricing" className="section-wrap">
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: 16, marginBottom: 28 }}>
-          <div>
-            <span className="eyebrow-pill">Simple, Transparent Pricing</span>
-            <h2 style={{ margin: "10px 0 4px", fontSize: "2.1rem", letterSpacing: "-0.025em" }}>
-              Start free on-device. Scale with zero-egress cloud relay.
-            </h2>
-          </div>
-          <div className="segmented">
-            <button
-              type="button"
-              className={billingInterval === "monthly" ? "active" : ""}
-              onClick={() => setBillingInterval("monthly")}
-            >
-              Monthly
-            </button>
-            <button
-              type="button"
-              className={billingInterval === "yearly" ? "active" : ""}
-              onClick={() => setBillingInterval("yearly")}
-            >
-              Yearly (Save 31%)
-            </button>
-          </div>
-        </div>
-
-        <div className="feature-grid-3">
-          {plans.map((p) => {
-            const price = billingInterval === "yearly" && p.yearly_usd > 0 ? `$${p.yearly_usd}` : `$${p.monthly_usd}`;
-            const unit = p.monthly_usd === 0 ? "free forever" : billingInterval === "yearly" ? "/ year" : "/ month";
-            return (
-              <div key={p.tier} className={`editorial-card ${p.highlighted ? "highlighted" : ""}`}>
-                {p.highlighted && <span className="plan-badge">Recommended</span>}
-                <div style={{ fontWeight: 700, fontSize: "1.12rem" }}>{p.name}</div>
-                <div style={{ fontSize: "0.84rem", color: "var(--muted)", minHeight: 36 }}>{p.tagline}</div>
-                <div>
-                  <span className="price-figure">{price}</span>{" "}
-                  <span style={{ fontSize: "0.85rem", color: "var(--muted)" }}>{unit}</span>
-                </div>
-                <ul className="feature-list">
-                  {p.features.map((f) => (
-                    <li key={f}>{f}</li>
+          <div className="demo-canvas">
+            {previewTab === "chat" && (
+              <>
+                <div className="prompt-selector">
+                  {PRESET_EXCHANGES.map((item) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      className={`prompt-tab ${activeExchange.id === item.id ? "active" : ""}`}
+                      onClick={() => setActiveExchange(item)}
+                    >
+                      {item.label}
+                    </button>
                   ))}
-                </ul>
-                <button
-                  type="button"
-                  className={`btn ${p.highlighted ? "btn-terracotta" : "btn-forest"}`}
-                  style={{ marginTop: "auto" }}
-                  onClick={() => handlePlanCta(p.tier)}
-                >
-                  {p.tier === "starter" ? "Get Started Free" : `Choose ${p.name}`}
-                </button>
-              </div>
-            );
-          })}
-        </div>
+                </div>
 
-        <div style={{ textAlign: "center", marginTop: 20, fontSize: "0.82rem", color: "var(--muted)" }}>
-          Checkout powered by Stripe • Supports <strong> Apple Pay</strong>, <strong>Google Pay</strong>,{" "}
-          <strong>Link</strong>, and all credit/debit cards.
+                <div className="demo-msg-user">{activeExchange.prompt}</div>
+
+                <div className="demo-result-card">
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                    <span className="mono" style={{ fontSize: "0.68rem", fontWeight: 700, color: "var(--orange)" }}>
+                      {activeExchange.status}
+                    </span>
+                    {activeExchange.videoStamp && (
+                      <span className="mono" style={{ fontSize: "0.68rem", color: "var(--muted)" }}>
+                        {activeExchange.videoStamp}
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ fontWeight: 800, fontSize: "0.92rem" }}>{activeExchange.file}</div>
+                  <div style={{ fontSize: "0.81rem", color: "var(--ink-soft)" }}>{activeExchange.detail}</div>
+                  {activeExchange.videoStamp && (
+                    <div className="scrubber-bar" aria-hidden="true">
+                      <div className="scrubber-fill" />
+                    </div>
+                  )}
+                </div>
+
+                <form className="demo-input-row" onSubmit={handleCustomDemoSubmit}>
+                  <input
+                    className="demo-mini-input"
+                    placeholder="Try typing a request (e.g. Send tax PDF to Sarah)…"
+                    value={customDraft}
+                    onChange={(e) => setCustomDraft(e.target.value)}
+                  />
+                  <button type="submit" className="demo-mini-send">
+                    Run
+                  </button>
+                </form>
+              </>
+            )}
+
+            {previewTab === "search" && (
+              <>
+                <input
+                  className="demo-mini-input"
+                  style={{ flex: "none", padding: "10px 12px" }}
+                  value={demoSearchQuery}
+                  onChange={(e) => setDemoSearchQuery(e.target.value)}
+                  placeholder="Search by scene, location, person, or text…"
+                />
+
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {filteredDemoSearch.map((item) => (
+                    <div
+                      key={item.id}
+                      style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        padding: "11px 13px",
+                        borderRadius: 10,
+                        border: "1px solid var(--line)",
+                        background: "var(--off-white)",
+                        gap: 10,
+                      }}
+                    >
+                      <div>
+                        <div style={{ fontWeight: 700, fontSize: "0.86rem" }}>{item.title}</div>
+                        <div style={{ fontSize: "0.76rem", color: "var(--muted)", marginTop: 2 }}>{item.meta}</div>
+                      </div>
+                      <span
+                        className="mono"
+                        style={{
+                          fontSize: "0.7rem",
+                          fontWeight: 700,
+                          padding: "3px 8px",
+                          borderRadius: 6,
+                          background: item.badge === "00:14" ? "var(--orange)" : "var(--black)",
+                          color: "var(--white)",
+                        }}
+                      >
+                        {item.badge}
+                      </span>
+                    </div>
+                  ))}
+                  {filteredDemoSearch.length === 0 && (
+                    <div style={{ fontSize: "0.82rem", color: "var(--muted)", padding: "14px 4px" }}>
+                      Try “surf”, “Shanghai”, or “passport”.
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+
+            {previewTab === "received" && (
+              <div style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", flex: 1 }}>
+                <div className="demo-result-card">
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span className="mono" style={{ fontSize: "0.68rem", fontWeight: 700, color: "var(--orange)" }}>
+                      INCOMING BUNDLE
+                    </span>
+                    <span className="mono" style={{ fontSize: "0.7rem", color: "var(--muted)" }}>
+                      18.4 MB
+                    </span>
+                  </div>
+                  <div style={{ fontWeight: 800, fontSize: "0.96rem" }}>Shanghai Film Scans (4 photos)</div>
+                  <div style={{ fontSize: "0.82rem", color: "var(--ink-soft)" }}>
+                    From <strong>@mehmet</strong> · Uncompressed originals ready for Photos.
+                  </div>
+
+                  <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+                    {savedToPhotos ? (
+                      <button
+                        type="button"
+                        className="btn btn-black"
+                        style={{ padding: "8px 14px", fontSize: "0.8rem" }}
+                        onClick={() => setSavedToPhotos(false)}
+                      >
+                        ✓ Saved to Apple Photos
+                      </button>
+                    ) : (
+                      <>
+                        <button
+                          type="button"
+                          className="btn btn-orange"
+                          style={{ padding: "8px 14px", fontSize: "0.8rem" }}
+                          onClick={() => setSavedToPhotos(true)}
+                        >
+                          Save to Photos
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-outline"
+                          style={{ padding: "8px 14px", fontSize: "0.8rem" }}
+                          onClick={() => setSavedToPhotos(true)}
+                        >
+                          Save to Files
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </div>
+
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    paddingTop: 12,
+                    borderTop: "1px solid var(--line)",
+                    fontSize: "0.78rem",
+                    color: "var(--muted)",
+                  }}
+                >
+                  <span>Already have an account?</span>
+                  <button
+                    type="button"
+                    className="text-link-btn"
+                    onClick={authenticatedUser ? onEnterApp : onOpenLogin}
+                  >
+                    {authenticatedUser ? "Enter workspace →" : "Sign in →"}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </section>
 
-      {/* Footer */}
-      <footer style={{ borderTop: "1px solid var(--border)", padding: "28px 24px", marginTop: 24 }}>
-        <div
-          style={{
-            maxWidth: 1160,
-            margin: "0 auto",
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            flexWrap: "wrap",
-            gap: 14,
-            fontSize: "0.84rem",
-            color: "var(--muted)",
-          }}
-        >
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <img src="/logo.png" alt="fyde." style={{ height: 22 }} />
-            <span>© {new Date().getFullYear()} fyde. • Hosted at fyde.izbirakin.com</span>
+      {/* Crisp Architectural 3-Column Strip */}
+      <section className="ledger-band" aria-label="Core workflow">
+        <div className="ledger-grid">
+          <div className="ledger-cell">
+            <span className="ledger-index">01 / SEARCH</span>
+            <h3>Recall moments, not filenames.</h3>
+            <p>
+              Find photos, PDFs, and the exact timestamp inside a video by describing where it was, who was there, or
+              what happened.
+            </p>
           </div>
-          <div style={{ display: "flex", gap: 16 }}>
-            <a href="#waitlist">Waitlist</a>
-            <a href="#pricing">Pricing</a>
-            <button
-              type="button"
-              style={{ background: "none", border: "none", cursor: "pointer", color: "var(--ink)", fontWeight: 600 }}
-              onClick={() => onOpenLogin()}
-            >
-              Member Log in →
-            </button>
+
+          <div className="ledger-cell">
+            <span className="ledger-index">02 / CHAT</span>
+            <h3>Share or delegate in one line.</h3>
+            <p>
+              Send files over Fyde, iMessage, or email, or grant a partner or friend scoped access to a trip.
+            </p>
           </div>
+
+          <div className="ledger-cell">
+            <span className="ledger-index">03 / RECEIVED</span>
+            <h3>Originals straight to Photos.</h3>
+            <p>
+              Incoming transfers keep full resolution and metadata, saving directly into your iPhone or Mac library in
+              a single tap.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      {/* Clean Single-Line Footer */}
+      <footer className="landing-footer">
+        <div style={{ display: "flex", alignItems: "center" }}>
+          <img src="/logo.png" alt="fyde." style={{ height: 20 }} />
+        </div>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 18 }}>
+          <button
+            type="button"
+            className="btn-ghost"
+            style={{ padding: 0, border: "none", fontWeight: 600, fontSize: "0.82rem", cursor: "pointer" }}
+            onClick={focusHandleBar}
+          >
+            Reserve handle
+          </button>
+          <button
+            type="button"
+            className="text-link-btn"
+            onClick={authenticatedUser ? onEnterApp : onOpenLogin}
+          >
+            {authenticatedUser ? "Open app" : "Log in"}
+          </button>
         </div>
       </footer>
     </div>

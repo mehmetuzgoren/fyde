@@ -13,11 +13,11 @@ function makePosterSvg(title: string, subtitle: string, topHex: string, bottomHe
       </linearGradient>
     </defs>
     <rect width="800" height="600" fill="url(#g)"/>
-    <circle cx="640" cy="130" r="56" fill="#F8F9F4" opacity="0.88"/>
-    <rect x="44" y="438" width="712" height="118" rx="18" fill="#293022" opacity="0.92"/>
-    <text x="72" y="486" fill="#F8F9F4" font-family="system-ui, sans-serif" font-size="26" font-weight="700">${title}</text>
-    <text x="72" y="522" fill="#E2E5DC" font-family="system-ui, sans-serif" font-size="17">${subtitle}</text>
-    <circle cx="718" cy="497" r="11" fill="#BF5134"/>
+    <circle cx="640" cy="130" r="62" fill="#FFFFFF" opacity="0.92"/>
+    <rect x="44" y="438" width="712" height="118" rx="18" fill="#0A0A0A"/>
+    <text x="72" y="486" fill="#FFFFFF" font-family="system-ui, sans-serif" font-size="26" font-weight="800">${title}</text>
+    <text x="72" y="522" fill="#FFB38A" font-family="system-ui, sans-serif" font-size="17" font-weight="600">${subtitle}</text>
+    <circle cx="718" cy="497" r="12" fill="#FF5500"/>
   </svg>`;
 }
 
@@ -25,6 +25,7 @@ export async function ensureSeeded(env: Env): Promise<void> {
   if (seedChecked) return;
   const existing = await env.DB.prepare("SELECT COUNT(*) as cnt FROM users").first<{ cnt: number }>();
   if (Number(existing?.cnt || 0) > 0) {
+    await ensureSocialSeeded(env);
     seedChecked = true;
     return;
   }
@@ -33,10 +34,10 @@ export async function ensureSeeded(env: Env): Promise<void> {
   const demoPw = await hashPasswordPBKDF2("fyde2026");
 
   const demoUsers = [
-    ["mehmet", "mehmet", "Mehmet", "mehmet@izbirakin.com", "+14155550101", "#293022", "family"],
-    ["maya", "maya", "Maya", "maya@izbirakin.com", "+14155550102", "#BF5134", "family"],
-    ["alex", "alex", "Alex", "alex@fyde.local", "+14155550103", "#4B5940", "pro"],
-    ["sarah", "sarah", "Sarah", "sarah@taxfirm.local", "+14155550104", "#6B705C", "starter"],
+    ["mehmet", "mehmet", "Mehmet", "mehmet@izbirakin.com", "+14155550101", "#FF5500", "family"],
+    ["maya", "maya", "Maya", "maya@izbirakin.com", "+14155550102", "#0A0A0A", "family"],
+    ["alex", "alex", "Alex", "alex@fyde.local", "+14155550103", "#FF7733", "pro"],
+    ["sarah", "sarah", "Sarah", "sarah@taxfirm.local", "+14155550104", "#262626", "starter"],
   ] as const;
 
   for (const [id, handle, name, email, phone, color, plan] of demoUsers) {
@@ -132,7 +133,7 @@ export async function ensureSeeded(env: Env): Promise<void> {
     {
       key: "blob_china_wall.svg",
       contentType: "image/svg+xml",
-      body: makePosterSvg("Great Wall Sunset Selfie", "Beijing, China • Maya, Mehmet", "#C85A3A", "#3A2D3E"),
+      body: makePosterSvg("Great Wall Sunset Selfie", "Beijing, China • Maya, Mehmet", "#FF5500", "#121212"),
       asset: {
         id: "asset_china_wall_maya",
         owner_id: "mehmet",
@@ -160,7 +161,7 @@ export async function ensureSeeded(env: Env): Promise<void> {
     {
       key: "blob_shanghai_bund.svg",
       contentType: "image/svg+xml",
-      body: makePosterSvg("Shanghai Bund Skyline Dinner", "Shanghai, China • Maya, Alex, Mehmet", "#B84A58", "#1D2848"),
+      body: makePosterSvg("Shanghai Bund Skyline Dinner", "Shanghai, China • Maya, Alex, Mehmet", "#FF7733", "#0A0A0A"),
       asset: {
         id: "asset_shanghai_bund_group",
         owner_id: "mehmet",
@@ -188,7 +189,7 @@ export async function ensureSeeded(env: Env): Promise<void> {
     {
       key: "blob_hangzhou_lake.svg",
       contentType: "image/svg+xml",
-      body: makePosterSvg("West Lake Pagoda Walk", "Hangzhou, China • Alex, Mehmet", "#BF6B3F", "#2B4C44"),
+      body: makePosterSvg("West Lake Pagoda Walk", "Hangzhou, China • Alex, Mehmet", "#0A0A0A", "#FF5500"),
       asset: {
         id: "asset_hangzhou_temple_alex",
         owner_id: "mehmet",
@@ -378,5 +379,42 @@ export async function ensureSeeded(env: Env): Promise<void> {
       .run();
   }
 
+  await ensureSocialSeeded(env);
   seedChecked = true;
+}
+
+async function ensureSocialSeeded(env: Env): Promise<void> {
+  try {
+    const fCount = await env.DB.prepare("SELECT COUNT(*) as cnt FROM friendships").first<{ cnt: number }>();
+    if (Number(fCount?.cnt || 0) > 0) return;
+
+    const now = new Date().toISOString();
+    const pairs: Array<[string, string, string, "accepted" | "pending"]> = [
+      ["fr_mehmet_maya", "mehmet", "maya", "accepted"],
+      ["fr_mehmet_alex", "mehmet", "alex", "accepted"],
+      ["fr_sarah_mehmet", "sarah", "mehmet", "pending"],
+    ];
+    for (const [id, reqId, addId, status] of pairs) {
+      await env.DB.prepare(
+        "INSERT OR IGNORE INTO friendships (id, requester_id, addressee_id, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)"
+      )
+        .bind(id, reqId, addId, status, now, now)
+        .run();
+    }
+
+    const feedRows: Array<[string, string, string | null, string, string]> = [
+      ["act_1", "mehmet", "maya", "connected", "@mehmet and @maya connected as Trusted contacts"],
+      ["act_2", "mehmet", "alex", "permission_granted", "@mehmet shared China trip Smart Scope with @alex"],
+      ["act_3", "maya", null, "asset_uploaded", "@maya indexed Milo Annual Vet Checkup Invoice"],
+    ];
+    for (const [id, actorId, targetId, kind, summary] of feedRows) {
+      await env.DB.prepare(
+        "INSERT OR IGNORE INTO activity_feed (id, actor_id, target_user_id, kind, summary, created_at) VALUES (?, ?, ?, ?, ?, ?)"
+      )
+        .bind(id, actorId, targetId, kind, summary, now)
+        .run();
+    }
+  } catch {
+    // Social migration not yet applied
+  }
 }
