@@ -461,6 +461,75 @@ async function main() {
     assert.ok((await inbox("sarah")).bundles.some((bundle) => bundle.id === ownedBundle.id));
     console.log("✓ Send authorization rejects foreign/missing assets, mixed batches, spoofed senders, and malformed IDs; owned sends work");
 
+    // Delete uses the authenticated owner, even if a different user_id is supplied.
+    const deleteHeaders = { Authorization: `Bearer ${loginData.token}` };
+    const uploadForDeletion = async (title) => {
+      const form = new FormData();
+      form.set("owner_id", loginData.user.id);
+      form.set("title", title);
+      form.set("file", new Blob(["File deletion integration fixture"], { type: "text/plain" }), `${title}.txt`);
+      const res = await fetch(`${BASE}/api/assets/upload`, { method: "POST", headers: deleteHeaders, body: form });
+      assert.equal(res.status, 200);
+      return res.json();
+    };
+    const unshared = await uploadForDeletion("Unshared file");
+    const deleteUrl = `${BASE}/api/assets/${unshared.id}?user_id=${loginData.user.id}`;
+    assert.equal((await fetch(deleteUrl, { method: "DELETE" })).status, 401);
+    assert.equal((await fetch(deleteUrl, {
+      method: "DELETE", headers: { Authorization: `Bearer ${verifyData.token}` },
+    })).status, 403, "A forged user_id cannot delete someone else's file");
+    assert.equal((await fetch(`${BASE}${unshared.download_url}`)).status, 200, "Rejected deletes preserve the bytes");
+    const deleteEvents = [];
+    const deleteSocket = new WebSocket(`${BASE.replace(/^http/, "ws")}/ws/${loginData.user.id}?device_id=delete_test&platform=web`);
+    deleteSocket.addEventListener("message", (event) => deleteEvents.push(JSON.parse(event.data)));
+    await once(deleteSocket, "open");
+    try {
+      const deleted = await fetch(deleteUrl, { method: "DELETE", headers: deleteHeaders });
+      assert.equal(deleted.status, 200);
+      assert.deepEqual(await deleted.json(), { ok: true, id: unshared.id });
+      for (let i = 0; i < 50 && !deleteEvents.some((event) => event.event === "asset_deleted"); i++) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      assert.ok(deleteEvents.some((event) => event.event === "asset_deleted" && event.payload.id === unshared.id));
+    } finally {
+      deleteSocket.close();
+    }
+    assert.equal((await fetch(deleteUrl, { method: "DELETE", headers: deleteHeaders })).status, 404);
+    assert.equal((await fetch(`${BASE}${unshared.download_url}`)).status, 404, "Unshared bytes are deleted from R2");
+    const remaining = await (await fetch(`${BASE}/api/assets/${loginData.user.id}`)).json();
+    assert.ok(!remaining.some((asset) => asset.id === unshared.id));
+    const searchAfterDelete = await (await fetch(`${BASE}/api/search`, {
+      method: "POST", headers: { ...deleteHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({ user_id: loginData.user.id, query: "", scope: "mine" }),
+    })).json();
+    assert.ok(!searchAfterDelete.some((hit) => hit.asset.id === unshared.id));
+
+    const shared = await uploadForDeletion("Shared file");
+    const sharedSend = await fetch(`${BASE}/api/send`, {
+      method: "POST", headers: { ...deleteHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({ asset_ids: [shared.id], recipient_name: "Sarah", recipient_user_id: "sarah", channel: "fyde_direct" }),
+    });
+    assert.equal(sharedSend.status, 200);
+    const sharedBundle = await sharedSend.json();
+    assert.equal((await fetch(`${BASE}/api/assets/${shared.id}`, { method: "DELETE", headers: deleteHeaders })).status, 200);
+    assert.equal((await fetch(`${BASE}${sharedBundle.items[0].download_url}`)).status, 200, "Delivered bundles keep working");
+    const receivedAfterDelete = await sarahSearch("contacts", "");
+    assert.ok(receivedAfterDelete.some((hit) => hit.asset.id === shared.id), "The received copy stays searchable");
+
+    const copied = await uploadForDeletion("Copied file");
+    const savedCopy = { ...copied, id: `${copied.id}_copy`, owner_id: verifyData.user.id };
+    const sqlQuote = (value) => `'${String(value).replaceAll("'", "''")}'`;
+    await executeSql(`INSERT INTO assets (id, owner_id, media_type, created_at, data) VALUES (${[
+      savedCopy.id, savedCopy.owner_id, savedCopy.media_type, savedCopy.created_at, JSON.stringify(savedCopy),
+    ].map(sqlQuote).join(",")});`);
+    assert.equal((await fetch(`${BASE}/api/assets/${copied.id}`, { method: "DELETE", headers: deleteHeaders })).status, 200);
+    assert.equal((await fetch(`${BASE}${copied.download_url}`)).status, 200, "Another library copy retains its bytes");
+    assert.equal((await fetch(`${BASE}/api/assets/${savedCopy.id}`, {
+      method: "DELETE", headers: { Authorization: `Bearer ${verifyData.token}` },
+    })).status, 200);
+    assert.equal((await fetch(`${BASE}${copied.download_url}`)).status, 404, "The last unshared library copy removes the blob");
+    console.log("✓ File deletion verifies authentication, ownership, search removal, device events, R2 cleanup, and shared-copy preservation");
+
     await runVoiceSendScenarios(BASE, executeSql);
 
     console.log("\nALL CLOUDFLARE EDGE E2E TESTS PASSED!");

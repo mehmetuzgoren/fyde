@@ -429,6 +429,9 @@ private struct AssetDetailSheet: View {
     let showReason: Bool
     @Environment(\.dismiss) private var dismiss
     @State private var player: AVPlayer?
+    @State private var showDeleteConfirmation = false
+    @State private var isDeleting = false
+    @State private var deleteError: String?
 
     private var asset: IndexedAsset { hit.asset }
     private var isMine: Bool { asset.ownerId == store.currentUserId }
@@ -526,6 +529,23 @@ private struct AssetDetailSheet: View {
                     }
                     if isMine {
                         sendMenu
+                            .disabled(isDeleting)
+                        if let deleteError {
+                            Text(deleteError)
+                                .font(.subheadline)
+                                .foregroundStyle(.red)
+                                .accessibilityAddTraits(.updatesFrequently)
+                        }
+                        Button(role: .destructive) {
+                            showDeleteConfirmation = true
+                        } label: {
+                            Label(isDeleting ? "Deleting…" : "Delete file", systemImage: "trash")
+                                .font(.subheadline.weight(.semibold))
+                                .frame(maxWidth: .infinity, minHeight: 48)
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(.red)
+                        .disabled(isDeleting)
                     }
                 }
                 .padding(16)
@@ -538,8 +558,29 @@ private struct AssetDetailSheet: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
                         .tint(FydeTheme.accent)
+                        .disabled(isDeleting)
                 }
             }
+            .confirmationDialog("Delete “\(asset.title)” from your library?", isPresented: $showDeleteConfirmation, titleVisibility: .visible) {
+                Button("Delete file", role: .destructive) {
+                    guard !isDeleting else { return }
+                    isDeleting = true
+                    deleteError = nil
+                    Task {
+                        defer { isDeleting = false }
+                        do {
+                            try await store.deleteAsset(asset)
+                            dismiss()
+                        } catch {
+                            deleteError = error.localizedDescription
+                        }
+                    }
+                }
+                Button("Cancel", role: .cancel) { }
+            } message: {
+                Text("This can’t be undone. Copies already sent or saved elsewhere will remain.")
+            }
+            .interactiveDismissDisabled(isDeleting)
             .onAppear {
                 guard asset.mediaType == .video, let url = store.resolvedAssetURL(asset.downloadUrl) else { return }
                 let avPlayer = AVPlayer(url: url)

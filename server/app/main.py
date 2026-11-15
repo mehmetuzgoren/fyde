@@ -246,6 +246,18 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Blob not found")
         return FileResponse(path)
 
+    @app.delete("/api/assets/{asset_id}")
+    async def delete_asset(asset_id: str, user_id: str) -> dict[str, Any]:
+        # The local development relay uses explicit user IDs, like its other write routes.
+        asset = storage.get_asset(asset_id)
+        if not asset:
+            raise HTTPException(status_code=404, detail="File not found.")
+        if asset.owner_id != user_id:
+            raise HTTPException(status_code=403, detail="Only the owner can delete this file.")
+        storage.delete_asset(asset)
+        await hub.notify_user(user_id, "asset_deleted", {"id": asset.id})
+        return {"ok": True, "id": asset.id}
+
     # ---------- Unified Multimodal Search (Own, Received & Permitted Contacts) ----------
     @app.post("/api/search", response_model=list[SearchHit])
     async def multimodal_search(req: SearchRequest) -> list[SearchHit]:

@@ -13,6 +13,7 @@ import type {
   ContactPermission,
   DirectoryUser,
   FriendRequestRecord,
+  IndexedAsset,
   MediaType,
   PermissionTier,
   SearchHit,
@@ -74,6 +75,28 @@ export default function App() {
   const [searchHits, setSearchHits] = useState<SearchHit[]>([]);
   const [playingHit, setPlayingHit] = useState<SearchHit | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const searchVersion = useRef(0);
+  const deleteDialogRef = useRef<HTMLDialogElement | null>(null);
+  const deleteInProgress = useRef(false);
+  const focusSearchAfterDelete = useRef(false);
+  const [deleteTarget, setDeleteTarget] = useState<IndexedAsset | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const dialog = deleteDialogRef.current;
+    if (deleteTarget) {
+      setDeleteError(null);
+      if (dialog && !dialog.open) dialog.showModal();
+    } else {
+      dialog?.close();
+      if (focusSearchAfterDelete.current) {
+        searchInputRef.current?.focus();
+        focusSearchAfterDelete.current = false;
+      }
+    }
+  }, [deleteTarget]);
 
   // Chat & Permissions state
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
@@ -211,6 +234,7 @@ export default function App() {
 
   const runSearch = useCallback(
     async (uid: string, q: string, scope: "all" | "mine" | "contacts", mtype: MediaType | "") => {
+      const version = ++searchVersion.current;
       try {
         const res = await fetch(resolveUrl("/api/search"), {
           method: "POST",
@@ -225,13 +249,14 @@ export default function App() {
           }),
         });
         if (res.ok) {
-          setSearchHits(await res.json());
+          const hits: SearchHit[] = await res.json();
+          if (version === searchVersion.current) setSearchHits(hits);
           return;
         }
       } catch {
         // leave empty on failure
       }
-      setSearchHits([]);
+      if (version === searchVersion.current) setSearchHits([]);
     },
     [authHeaders, resolveUrl]
   );
@@ -325,6 +350,11 @@ export default function App() {
           if (disposed) return;
           try {
             const msg = JSON.parse(evt.data);
+            if (msg.event === "asset_deleted") {
+              ++searchVersion.current;
+              setSearchHits((hits) => hits.filter((hit) => hit.asset.id !== msg.payload.id));
+              setPlayingHit((hit) => hit?.asset.id === msg.payload.id ? null : hit);
+            }
             if (msg.event === "chat_message" || msg.event === "chat_message_updated") {
               const message = msg.payload as ChatMessage;
               if (message.user_id === currentUserId) {
@@ -406,7 +436,38 @@ export default function App() {
     localStorage.removeItem("fyde_token");
     setAuthToken(null);
     setAuthUser(null);
+    setDeleteTarget(null);
     setShowLanding(true);
+  }
+
+  async function deleteFile() {
+    if (!deleteTarget || deleteTarget.owner_id !== currentUserId || deleteInProgress.current) return;
+    const asset = deleteTarget;
+    deleteInProgress.current = true;
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      const res = await fetch(resolveUrl(`/api/assets/${encodeURIComponent(asset.id)}?user_id=${encodeURIComponent(currentUserId)}`), {
+        method: "DELETE",
+        headers: authHeaders(),
+        credentials: "include",
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => null);
+        throw new Error(data?.error || data?.detail || "Could not delete this file. Please try again.");
+      }
+      ++searchVersion.current;
+      setSearchHits((hits) => hits.filter((hit) => hit.asset.id !== asset.id));
+      setPlayingHit((hit) => hit?.asset.id === asset.id ? null : hit);
+      focusSearchAfterDelete.current = true;
+      setDeleteTarget(null);
+      setToast(`Deleted “${asset.title}” from your library.`);
+    } catch (error) {
+      setDeleteError(error instanceof Error ? error.message : "Could not delete this file. Please try again.");
+    } finally {
+      deleteInProgress.current = false;
+      setDeleting(false);
+    }
   }
 
   async function submitChat(textOverride?: string) {
@@ -775,7 +836,7 @@ export default function App() {
       </header>
 
       {toast && (
-        <div className="toast-banner">
+        <div className="toast-banner" role="status">
           <span>{toast}</span>
           <button
             type="button"
@@ -787,13 +848,42 @@ export default function App() {
         </div>
       )}
 
+      <dialog
+        ref={deleteDialogRef}
+        className="modal-card delete-file-dialog"
+        aria-labelledby="delete-file-title"
+        aria-describedby="delete-file-description"
+        aria-busy={deleting}
+        onCancel={(event) => {
+          event.preventDefault();
+          if (!deleteInProgress.current) setDeleteTarget(null);
+        }}
+      >
+        <h2 id="delete-file-title">Delete file?</h2>
+        <p id="delete-file-description">
+          Delete “{deleteTarget?.title}” from your library? This can’t be undone.
+          Copies already sent or saved elsewhere will remain.
+        </p>
+        {deleteError && <p className="delete-file-error" role="alert">{deleteError}</p>}
+        <div className="delete-file-actions">
+          <button type="button" className="btn btn-outline" disabled={deleting} autoFocus onClick={() => setDeleteTarget(null)}>
+            Cancel
+          </button>
+          <button type="button" className="btn btn-danger" disabled={deleting} onClick={() => void deleteFile()}>
+            {deleting ? "Deleting…" : "Delete file"}
+          </button>
+        </div>
+      </dialog>
+
       <main className="main-stage">
         {/* LEFT TAB: SEARCH */}
         {activeTab === "search" && (
           <>
             <div style={{ display: "flex", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
               <input
+                ref={searchInputRef}
                 className="chat-input"
+                aria-label="Search files"
                 placeholder="Search photos, video moments, or PDFs…"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
@@ -917,6 +1007,14 @@ export default function App() {
                           onClick={() => quickSend(hit.asset.id, hit.asset.title, "Sarah", "email")}
                         >
                           Email
+                        </button>
+                        <button
+                          type="button"
+                          className="pill delete-file-action"
+                          aria-label={`Delete ${hit.asset.title}`}
+                          onClick={() => setDeleteTarget(hit.asset)}
+                        >
+                          Delete
                         </button>
                       </>
                     )}

@@ -1321,6 +1321,42 @@ export default {
       return withCors(Response.json((results || []).map((r) => JSON.parse(String(r.data)))));
     }
 
+    const deleteAssetMatch = path.match(/^\/api\/assets\/([^/]+)$/);
+    if (deleteAssetMatch && request.method === "DELETE") {
+      const user = await getAuthenticatedUser(request, env);
+      if (!user) return withCors(Response.json({ error: "Sign in to delete files." }, { status: 401 }), request);
+      const assetId = decodeURIComponent(deleteAssetMatch[1]);
+      const row = await env.DB.prepare("SELECT data FROM assets WHERE id = ?").bind(assetId).first<{ data: string }>();
+      if (!row) return withCors(Response.json({ error: "File not found." }, { status: 404 }), request);
+      const asset = JSON.parse(row.data) as IndexedAsset;
+      if (asset.owner_id !== user.id) {
+        return withCors(Response.json({ error: "Only the owner can delete this file." }, { status: 403 }), request);
+      }
+
+      try {
+        if (asset.blob_id) {
+          const blobUrl = `/api/blobs/${asset.blob_id}`;
+          // A delivered bundle or another library copy still needs these bytes.
+          const referenced = await env.DB.prepare(`
+            SELECT 1 FROM assets WHERE id != ? AND (
+              json_extract(data, '$.blob_id') = ? OR
+              json_extract(data, '$.download_url') = ? OR json_extract(data, '$.thumbnail_url') = ?
+            )
+            UNION ALL
+            SELECT 1 FROM bundles, json_each(bundles.data, '$.items') AS item WHERE
+              json_extract(item.value, '$.download_url') = ? OR json_extract(item.value, '$.thumbnail_url') = ?
+            LIMIT 1
+          `).bind(asset.id, asset.blob_id, blobUrl, blobUrl, blobUrl, blobUrl).first();
+          if (!referenced) await env.BLOBS.delete(asset.blob_id);
+        }
+        await env.DB.prepare("DELETE FROM assets WHERE id = ? AND owner_id = ?").bind(asset.id, user.id).run();
+      } catch {
+        return withCors(Response.json({ error: "Could not delete this file. Please try again." }, { status: 500 }), request);
+      }
+      await notifyUserHub(env, user.id, "asset_deleted", { id: asset.id });
+      return withCors(Response.json({ ok: true, id: asset.id }), request);
+    }
+
     // Re-embed an existing asset with EmbeddingGemma 2. Optional multipart `preview` / `frame` /
     // `frame_times` / `frame_labels` / `duration_sec` (see mediaIndex.readMediaParts); otherwise the
     // original is read back from R2.
