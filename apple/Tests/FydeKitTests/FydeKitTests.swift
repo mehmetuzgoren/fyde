@@ -23,6 +23,33 @@ final class FydeKitTests: XCTestCase {
     }
 
     @MainActor
+    func testOfflineSearchFindsRaftingForKayakPhotos() async {
+        let store = FydeStore(relayBaseURL: "http://127.0.0.1:8765")
+        store.currentUserId = "mehmet"
+        store.isRelayConnected = false
+        store.searchScope = "mine"
+        store.selectedMediaFilter = .photo
+        store.myAssets = [
+            IndexedAsset(
+                id: "rafting", ownerId: "mehmet", filename: "IMG_4829.jpg", title: "River Adventure",
+                mediaType: .photo, mimeType: "image/jpeg", createdAt: "2026-11-01T00:00:00Z",
+                tags: ["rafting", "watersport", "oar"]
+            ),
+            IndexedAsset(
+                id: "cat", ownerId: "mehmet", filename: "IMG_4830.jpg", title: "Milo on the Couch",
+                mediaType: .photo, mimeType: "image/jpeg", createdAt: "2026-11-01T00:00:00Z",
+                tags: ["cat", "feline"]
+            )
+        ]
+        for query in ["kayak photos", "kayaking", "canoeing pictures", "paddling"] {
+            store.searchQuery = query
+            await store.performSearch()
+            XCTAssertEqual(store.searchHits.first?.asset.id, "rafting", query)
+            XCTAssertFalse(store.searchHits.contains { $0.asset.id == "cat" }, query)
+        }
+    }
+
+    @MainActor
     func testOfflineSearchIncludesReceivedFilesInSharedScopes() async {
         let store = FydeStore(relayBaseURL: "http://127.0.0.1:8765")
         store.currentUserId = "sarah"

@@ -2087,7 +2087,9 @@ export default {
       // D) Outbound sends are handled up front by handleChatSendCommand.
       // E) Multimodal Search in Chat
       else {
-        const hits = await searchLibrary(env, userId, text, null, 6, { own: true, received: true });
+        const mediaTypes = analyzeItemPhrase(text).mediaTypes;
+        const mediaType = mediaTypes.length === 1 ? mediaTypes[0] : null;
+        const hits = await searchLibrary(env, userId, text, mediaType, 6, { own: true, received: true });
         if (hits.length === 0) {
           replyText = `No multimodal matches found for "${text}".`;
         } else {

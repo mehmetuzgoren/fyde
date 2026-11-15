@@ -44,7 +44,7 @@ try {
           if (mode === "nonfinite") return {data:[{embedding:Array(768).fill(NaN)}]};
           if (input.input) {
             if (!input.input[0].startsWith("task: search result | query: ") && !input.input[0].startsWith("title: ")) throw Error("missing task prefix");
-            return {data:[{embedding:vector(input.input[0].includes("unrelated") ? 1 : 0)}]};
+            return {data:[{embedding:vector(/unrelated|kayak/.test(input.input[0]) ? 1 : 0)}]};
           }
           const messages = Array.isArray(input.messages[0]) ? input.messages : [input.messages];
           return {data: messages.map((conversation, index) => {
@@ -70,10 +70,11 @@ try {
   }
   assert.ok(ready, "test Worker must start");
 
-  const upload = async (mode = "ok", heic = false) => {
+  const upload = async (mode = "ok", heic = false, tags = []) => {
     const form = new FormData();
     form.set("owner_id", "mehmet");
     form.set("ocr_text", "printed words");
+    form.set("tags", JSON.stringify(tags));
     form.set("file", new Blob([heic ? Buffer.from("HEIC original") : Buffer.from(png, "base64")],
       { type: heic ? "image/heic" : "image/png" }), heic ? "IMG_123.HEIC" : "IMG_123.png");
     if (heic) form.set("preview", new Blob([Buffer.from(png, "base64")], { type: "image/png" }), "preview.png");
@@ -100,6 +101,12 @@ try {
   assert.ok((await search("people at an event")).some((h) => h.asset.id === photo.id), "visual search must work without matching metadata");
   assert.ok(!(await search("unrelated subject")).some((h) => h.asset.id === photo.id));
   console.log("✓ Search embeds queries in the same space and rejects unrelated images");
+
+  const rafting = await upload("ok", false, ["rafting", "watersport", "oar"]);
+  const related = await search("kayak photos");
+  assert.ok(related.some((hit) => hit.asset.id === rafting.id), "Related tags remain searchable even when visual vectors disagree");
+  assert.ok(!related.some((hit) => hit.asset.id === photo.id), "A related tag must not match an untagged, unrelated image");
+  console.log("✓ Kayak search finds rafting tags on an existing visual index");
 
   const heic = await upload("ok", true);
   assert.equal(heic.embedder_name, "embeddinggemma-2-768");

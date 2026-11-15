@@ -571,7 +571,7 @@ public final class FydeStore {
                 ? onDeviceEmbedder.embedText(text)
                 : asset.embedding
             let sim = OnDeviceMultimodalEmbedder.cosineSimilarity(qVec, assetVec)
-            let lex = text.lowercased().contains(q.lowercased()) ? 0.3 : 0.0
+            let lex = 0.3 * MediaTermMatcher.coverage(query: q, text: text)
             let total = sim + lex
             guard total > 0.14 else { return nil }
             return SearchHit(asset: asset, score: min(0.99, total), matchReason: receivedReason(asset, fallback: "On-device Apple Neural Engine match"))

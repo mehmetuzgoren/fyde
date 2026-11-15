@@ -250,6 +250,30 @@ export async function runVoiceSendScenarios(base, executeSql) {
     "Confirmation must recheck that the sender still has the received files");
   assert.equal((await confirm(removedReceipt.id, { user_id: receiverId, via: "app" })).status, 403);
   console.log("✓ Received cat photos: search, all/both phrasing, contextual forwarding, confirmation, and unshared-file isolation");
+
+  const rafting = {
+    ...cat, id: "asset_voice_rafting", filename: "IMG_4829.jpg", title: "River Adventure",
+    tags: ["rafting", "watersport", "oar"], summary: "A group on the river",
+  };
+  const kayaking = { ...rafting, id: "asset_voice_kayaking", filename: "IMG_4830.jpg", tags: ["kayaking"] };
+  await executeSql([rafting, kayaking].map((asset) => `INSERT INTO assets (id, owner_id, media_type, created_at, data)
+    VALUES (${quote(asset.id)}, 'mehmet', 'photo', ${quote(asset.created_at)}, ${quote(JSON.stringify(asset))});`).join("\n"));
+  const paddlingIds = [rafting.id, kayaking.id].sort();
+  for (const query of ["kayak photos", "canoeing pictures", "paddling photos"]) {
+    const result = await post("/api/search", { user_id: "mehmet", query, scope: "mine", media_type: "photo" });
+    assert.equal(result.status, 200);
+    assert.ok(paddlingIds.every((id) => result.data.some((hit) => hit.asset.id === id)), query);
+  }
+  const relatedSearch = await chat("Show me my kayak photos", "typed");
+  assert.deepEqual([...relatedSearch.action_card.focus_asset_ids].sort(), paddlingIds);
+  const relatedSend = await chat("Send all my kayak photos to Maya", "typed");
+  assert.equal(type(relatedSend), "send_completed", relatedSend.text);
+  assert.deepEqual([...ids(relatedSend)].sort(), paddlingIds, "Include both exact and related visual tags, excluding unrelated photos");
+  const relatedVoice = await chat("Vexo send my canoeing photos to John");
+  assert.equal(type(relatedVoice), "send_confirmation", relatedVoice.text);
+  assert.deepEqual([...ids(relatedVoice)].sort(), paddlingIds);
+  await confirm(relatedVoice.id, { via: "app", decision: "cancel" });
+  console.log("✓ Related visual tags: kayak, kayaking, canoeing, and rafting work in search, focus, and typed/voice sends");
   console.log("✓ Headless Vexo command: Johnny receives cat photos, newest history restores both turns, live clients receive both events");
   console.log("✓ Vexo voice sends: context, contacts, permissions, confirmation, privacy changes, expiry, and delivery");
 }
