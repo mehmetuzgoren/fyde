@@ -1,6 +1,7 @@
 import { getAuthenticatedUser, handleWaitlistAndAuthRoutes, rowToUserProfile } from "./auth";
 import { handleBillingRoutes } from "./billing";
 import { randomId } from "./crypto";
+import { summarizeImage } from "./imageSummary";
 import { UserRelayHub } from "./durableHub";
 import { cosineSimilarity, embedQueryEdge, embedTextLocal, evaluateAssetPermission } from "./embedder";
 import { ensureSeeded } from "./seed";
@@ -483,8 +484,9 @@ export default {
         .split(",")
         .map((s) => s.trim())
         .filter(Boolean);
-      const summary = String(form.get("summary") || "").trim();
-      const title = String(form.get("title") || "").trim() || fname.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " ");
+      const description = mtype === "photo" ? await summarizeImage(env, { bytes, mime }, form.get("preview")) : null;
+      const summary = description?.summary || String(form.get("summary") || "").trim();
+      const title = description?.title || String(form.get("title") || "").trim() || fname.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " ");
       const owner = await findUser(env, ownerId);
 
       const asset: IndexedAsset = {

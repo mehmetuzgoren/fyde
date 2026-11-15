@@ -25,6 +25,14 @@ Multimodal, permissioned peer-to-peer file, photo, and video sharing across **iP
 
 ---
 
+## Image titles
+
+Fyde uses [Gemini 4 Hydrogen](https://aistudio.google.com/docs/models/gemini-4-hydrogen) to summarize uploaded photos and name them from their visible content. The title and summary appear in the library and search results; the original filename and file stay intact. If Gemini is unavailable, the upload keeps its supplied title or filename.
+
+Set `GEMINI_API_KEY` in the backend environment. For local Cloudflare development, put it in the ignored `edge/.dev.vars` file. For the Python relay, use an environment variable or run Uvicorn with `--env-file ../.env` from `server/`. Keep the key on the server. A deployed Worker reads it from a Cloudflare secret.
+
+The apps can send a JPEG preview alongside an original image, including HEIC. Gemini uses that preview when available.
+
 ## Repository Structure
 
 ```text
