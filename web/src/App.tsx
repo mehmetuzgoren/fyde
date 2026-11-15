@@ -87,7 +87,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>("chat");
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [currentUserId, setCurrentUserId] = useState<string>("mehmet");
-  const [connected, setConnected] = useState<boolean>(false);
+  const [connectionStatus, setConnectionStatus] = useState<"connecting" | "connected" | "reconnecting">("connecting");
   const [embedderLabel, setEmbedderLabel] = useState<string>("");
   const [toast, setToast] = useState<string | null>(null);
 
@@ -238,16 +238,13 @@ export default function App() {
         ]);
         if (hRes.ok) {
           const h = await hRes.json();
-          setConnected(true);
           setEmbedderLabel(h.embedder || "");
         }
         if (uRes.ok) {
           const loadedUsers: UserProfile[] = await uRes.json();
           setUsers(loadedUsers);
           const matching = loadedUsers.find((u) => u.id === uid);
-          if (matching && authUser && matching.id === authUser.id) {
-            setAuthUser(matching);
-          }
+          if (matching) setAuthUser((prev) => (prev?.id === matching.id ? matching : prev));
         }
         if (cRes.ok) setChatMessages(await cRes.json());
         if (pRes.ok) setPermissions(await pRes.json());
@@ -259,42 +256,81 @@ export default function App() {
         }
         await runSearch(uid, searchQuery, searchScope, mediaFilter);
       } catch {
-        setConnected(false);
+        // A failed data refresh does not change the live connection state.
       }
     },
-    [authUser, currentUserId, mediaFilter, resolveUrl, runSearch, searchQuery, searchScope]
+    [currentUserId, mediaFilter, resolveUrl, runSearch, searchQuery, searchScope]
   );
+
+  // Read current search settings without rebuilding the live connection.
+  const refreshAllRef = useRef(refreshAll);
+  useEffect(() => {
+    refreshAllRef.current = refreshAll;
+  }, [refreshAll]);
 
   useEffect(() => {
     if (showLanding) return;
-    void refreshAll(currentUserId);
+    setConnectionStatus("connecting");
+    void refreshAllRef.current(currentUserId);
 
-    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const wsUrl = API_BASE
-      ? `${API_BASE.replace(/^http/, "ws")}/ws/${currentUserId}?device_id=web_${currentUserId}&platform=web&device_name=Fyde+Web`
-      : `${proto}//${window.location.host}/ws/${currentUserId}?device_id=web_${currentUserId}&platform=web&device_name=Fyde+Web`;
-
-    const ws = new WebSocket(wsUrl);
-    ws.onopen = () => setConnected(true);
-    ws.onclose = () => setConnected(false);
-    ws.onmessage = (evt) => {
+    let ws: WebSocket | null = null;
+    let disposed = false;
+    let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+    let disconnectTimer: ReturnType<typeof setTimeout> | undefined;
+    const handleDisconnect = () => {
+      if (disposed) return;
+      // Let a short reconnect finish before changing the header status.
+      disconnectTimer ??= setTimeout(() => {
+        setConnectionStatus("reconnecting");
+      }, 3000);
+      reconnectTimer = setTimeout(connect, 2000);
+    };
+    const connect = () => {
+      if (disposed) return;
       try {
-        const msg = JSON.parse(evt.data);
-        if (
-          msg.event === "bundle_received" ||
-          msg.event === "access_request_created" ||
-          msg.event === "access_request_resolved" ||
-          msg.event === "permission_updated"
-        ) {
-          setToast(`Live Edge event: ${msg.event.replaceAll("_", " ")}`);
-          void refreshAll(currentUserId);
-        }
+        const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+        const wsUrl = API_BASE
+          ? `${API_BASE.replace(/^http/, "ws")}/ws/${currentUserId}?device_id=web_${currentUserId}&platform=web&device_name=Fyde+Web`
+          : `${proto}//${window.location.host}/ws/${currentUserId}?device_id=web_${currentUserId}&platform=web&device_name=Fyde+Web`;
+
+        ws = new WebSocket(wsUrl);
+        ws.onopen = () => {
+          if (disposed) return;
+          clearTimeout(disconnectTimer);
+          disconnectTimer = undefined;
+          setConnectionStatus("connected");
+          void refreshAllRef.current(currentUserId);
+        };
+        ws.onclose = handleDisconnect;
+        ws.onmessage = (evt) => {
+          if (disposed) return;
+          try {
+            const msg = JSON.parse(evt.data);
+            if (
+              msg.event === "bundle_received" ||
+              msg.event === "access_request_created" ||
+              msg.event === "access_request_resolved" ||
+              msg.event === "permission_updated"
+            ) {
+              setToast(`Live Edge event: ${msg.event.replaceAll("_", " ")}`);
+              void refreshAllRef.current(currentUserId);
+            }
+          } catch {
+            // ignore malformed events
+          }
+        };
       } catch {
-        // ignore
+        handleDisconnect();
       }
     };
-    return () => ws.close();
-  }, [currentUserId, refreshAll, showLanding]);
+    connect();
+    return () => {
+      disposed = true;
+      clearTimeout(reconnectTimer);
+      clearTimeout(disconnectTimer);
+      ws?.close();
+    };
+  }, [currentUserId, showLanding]);
 
   useEffect(() => {
     if (!showLanding) {
@@ -519,9 +555,11 @@ export default function App() {
             onClick={() => setShowLanding(true)}
             title="View fyde.izbirakin.com Landing Page"
           />
-          <span className={`status-dot ${connected ? "" : "offline"}`} />
+          <span className={`status-dot ${connectionStatus === "connected" ? "" : "offline"}`} />
           <span style={{ fontSize: "0.76rem", color: "var(--muted)", fontWeight: 500 }}>
-            {connected ? `Cloudflare Edge Live • ${embedderLabel}` : "Connecting to Edge…"}
+            {connectionStatus === "connected"
+              ? `Cloudflare Edge Live • ${embedderLabel}`
+              : connectionStatus === "connecting" ? "Connecting to Edge…" : "Reconnecting to Edge…"}
           </span>
         </div>
 
