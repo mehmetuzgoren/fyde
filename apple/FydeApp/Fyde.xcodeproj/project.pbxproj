@@ -3,12 +3,12 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 56;
+	objectVersion = 60;
 	objects = {
 
 /* Begin PBXBuildFile section */
+		6C5AF9DC30A9270800990AD2 /* FydeKit in Frameworks */ = {isa = PBXBuildFile; productRef = 6C5AF9DB30A9270800990AD2 /* FydeKit */; };
 		A10000010000000000000001 /* FydeAppMain.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000020000000000000001 /* FydeAppMain.swift */; };
-		A10000030000000000000001 /* FydeKit in Frameworks */ = {isa = PBXBuildFile; productRef = A10000040000000000000001 /* FydeKit */; };
 		A10000160000000000000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A10000170000000000000001 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
@@ -24,7 +24,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				A10000030000000000000001 /* FydeKit in Frameworks */,
+				6C5AF9DC30A9270800990AD2 /* FydeKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -74,7 +74,7 @@
 			);
 			name = Fyde;
 			packageProductDependencies = (
-				A10000040000000000000001 /* FydeKit */,
+				6C5AF9DB30A9270800990AD2 /* FydeKit */,
 			);
 			productName = Fyde;
 			productReference = A10000060000000000000001 /* Fyde.app */;
@@ -100,7 +100,7 @@
 			);
 			mainGroup = A10000080000000000000001;
 			packageReferences = (
-				A10000110000000000000001 /* XCLocalSwiftPackageReference ".." */,
+				6C5AF9DA30A9270800990AD2 /* XCLocalSwiftPackageReference "../../apple" */,
 			);
 			productRefGroup = A100000A0000000000000001 /* Products */;
 			projectDirPath = "";
@@ -177,11 +177,27 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_ENTITLEMENTS = App/Fyde.entitlements;
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				ENABLE_APP_SANDBOX = NO;
+				CURRENT_PROJECT_VERSION = 4;
+				DEVELOPMENT_TEAM = HU3SMXA4HW;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_FILE_ACCESS_DOWNLOADS_FOLDER = readwrite;
+				ENABLE_INCOMING_NETWORK_CONNECTIONS = YES;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
+				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = NO;
+				ENABLE_RESOURCE_ACCESS_BLUETOOTH = YES;
+				ENABLE_RESOURCE_ACCESS_CALENDARS = NO;
+				ENABLE_RESOURCE_ACCESS_CAMERA = NO;
+				ENABLE_RESOURCE_ACCESS_CONTACTS = NO;
+				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
+				ENABLE_RESOURCE_ACCESS_PRINTING = NO;
+				ENABLE_RESOURCE_ACCESS_USB = NO;
+				ENABLE_USER_SELECTED_FILES = readwrite;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = App/Info.plist;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -189,6 +205,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.fydefiles.app;
 				PRODUCT_NAME = Fyde;
 				SDKROOT = auto;
@@ -204,11 +221,27 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_ENTITLEMENTS = App/Fyde.entitlements;
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				ENABLE_APP_SANDBOX = NO;
+				CURRENT_PROJECT_VERSION = 4;
+				DEVELOPMENT_TEAM = HU3SMXA4HW;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_FILE_ACCESS_DOWNLOADS_FOLDER = readwrite;
+				ENABLE_INCOMING_NETWORK_CONNECTIONS = YES;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
+				ENABLE_RESOURCE_ACCESS_AUDIO_INPUT = NO;
+				ENABLE_RESOURCE_ACCESS_BLUETOOTH = YES;
+				ENABLE_RESOURCE_ACCESS_CALENDARS = NO;
+				ENABLE_RESOURCE_ACCESS_CAMERA = NO;
+				ENABLE_RESOURCE_ACCESS_CONTACTS = NO;
+				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
+				ENABLE_RESOURCE_ACCESS_PRINTING = NO;
+				ENABLE_RESOURCE_ACCESS_USB = NO;
+				ENABLE_USER_SELECTED_FILES = readwrite;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = App/Info.plist;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -216,6 +249,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.fydefiles.app;
 				PRODUCT_NAME = Fyde;
 				SDKROOT = auto;
@@ -251,16 +285,15 @@
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
-		A10000110000000000000001 /* XCLocalSwiftPackageReference ".." */ = {
+		6C5AF9DA30A9270800990AD2 /* XCLocalSwiftPackageReference "../../apple" */ = {
 			isa = XCLocalSwiftPackageReference;
-			relativePath = ..;
+			relativePath = ../../apple;
 		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
-		A10000040000000000000001 /* FydeKit */ = {
+		6C5AF9DB30A9270800990AD2 /* FydeKit */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = A10000110000000000000001 /* XCLocalSwiftPackageReference ".." */;
 			productName = FydeKit;
 		};
 /* End XCSwiftPackageProductDependency section */

@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse
 from .channels import send_email_background, send_imessage_via_local_mac
 from .chat_agent import parse_chat_intent
 from .embedder import MultimodalEmbedder
+from .image_summary import summarize_image
 from .models import (
     AcceptBundleRequest,
     AccessRequest,
@@ -166,6 +167,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         summary: str = Form(""),
         device_id: str = Form("local"),
         file: UploadFile = File(...),
+        preview: UploadFile | None = File(None),
     ) -> IndexedAsset:
         raw = await file.read()
         fname = file.filename or f"upload_{uuid.uuid4().hex[:8]}"
@@ -186,6 +188,18 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         tags_list = [t.strip() for t in tags.split(",") if t.strip()]
         owner = storage.get_user(owner_id)
         resolved_title = title.strip() or Path(fname).stem.replace("_", " ").replace("-", " ")
+        resolved_summary = summary.strip()
+        if mtype == "photo":
+            image = raw
+            image_mime = mime
+            if preview is not None:
+                preview_bytes = await preview.read(10 * 1024 * 1024 + 1)
+                if 0 < len(preview_bytes) <= 10 * 1024 * 1024:
+                    image, image_mime = preview_bytes, preview.content_type or "image/jpeg"
+            description = await summarize_image(image, image_mime)
+            if description:
+                resolved_title = description["title"]
+                resolved_summary = description["summary"]
 
         vec, moments, ocr_text, dur = embedder.embed_asset(
             filename=fname,
@@ -194,7 +208,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             location=location.strip(),
             people=people_list,
             tags=tags_list,
-            summary=summary.strip(),
+            summary=resolved_summary,
             raw_bytes=raw,
             file_path=blob_path,
         )
@@ -214,7 +228,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             people=people_list,
             tags=tags_list,
             ocr_text=ocr_text,
-            summary=summary.strip(),
+            summary=resolved_summary,
             duration_sec=dur,
             video_moments=moments,
             embedding=vec,
@@ -232,20 +246,18 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Blob not found")
         return FileResponse(path)
 
-    # ---------- Unified Multimodal Search (Left Tab: Own + Permitted Contacts!) ----------
+    # ---------- Unified Multimodal Search (Own, Received & Permitted Contacts) ----------
     @app.post("/api/search", response_model=list[SearchHit])
     async def multimodal_search(req: SearchRequest) -> list[SearchHit]:
-        results: list[SearchHit] = []
-
-        if req.scope in ("mine", "all"):
-            results.extend(
-                storage.search_owner_assets(
-                    owner_id=req.user_id,
-                    query=req.query,
-                    media_type=req.media_type,
-                    limit=req.limit,
-                )
-            )
+        results = storage.search_library(
+            user_id=req.user_id,
+            query=req.query,
+            media_type=req.media_type,
+            limit=req.limit,
+            include_own=req.scope != "contacts",
+            include_received=req.scope != "mine",
+            contact_owner_id=req.contact_owner_id,
+        )
 
         if req.scope in ("contacts", "all"):
             # Search across contacts who granted `trusted` or `smart_scope` access to `req.user_id`
@@ -271,7 +283,18 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                         results.append(hit)
 
         results.sort(key=lambda h: h.score, reverse=True)
-        return results[: req.limit]
+        unique: list[SearchHit] = []
+        seen_ids: set[str] = set()
+        seen_sources: set[str] = set()
+        for hit in results:
+            source = hit.asset.download_url if hit.asset.download_url != "#" else ""
+            if hit.asset.id in seen_ids or (source and source in seen_sources):
+                continue
+            seen_ids.add(hit.asset.id)
+            if source:
+                seen_sources.add(source)
+            unique.append(hit)
+        return unique[: req.limit]
 
     # ---------- Permissions ----------
     @app.get("/api/permissions/{owner_id}", response_model=list[ContactPermission])

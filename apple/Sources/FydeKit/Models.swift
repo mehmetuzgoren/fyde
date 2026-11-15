@@ -133,6 +133,7 @@ public struct UserProfile: Codable, Sendable, Identifiable, Equatable, Hashable 
     public var email: String
     public var phone: String
     public var avatarColor: String
+    public var bio: String?
     public var authProvider: String?
     public var planTier: PlanTier?
     public var billingInterval: String?
@@ -146,6 +147,7 @@ public struct UserProfile: Codable, Sendable, Identifiable, Equatable, Hashable 
         email: String = "",
         phone: String = "",
         avatarColor: String = "#293022",
+        bio: String? = nil,
         authProvider: String? = nil,
         planTier: PlanTier? = .starter,
         billingInterval: String? = "monthly",
@@ -158,12 +160,79 @@ public struct UserProfile: Codable, Sendable, Identifiable, Equatable, Hashable 
         self.email = email
         self.phone = phone
         self.avatarColor = avatarColor
+        self.bio = bio
         self.authProvider = authProvider
         self.planTier = planTier
         self.billingInterval = billingInterval
         self.subscriptionStatus = subscriptionStatus
         self.autoSaveTrustedToPhotos = autoSaveTrustedToPhotos
     }
+}
+
+public struct DirectoryUser: Codable, Sendable, Identifiable, Equatable, Hashable {
+    public var id: String
+    public var handle: String
+    public var displayName: String
+    public var avatarColor: String
+    public var bio: String
+    public var friendshipStatus: String
+    public var friendshipId: String?
+
+    public init(
+        id: String,
+        handle: String,
+        displayName: String,
+        avatarColor: String = "#FF5500",
+        bio: String = "",
+        friendshipStatus: String = "none",
+        friendshipId: String? = nil
+    ) {
+        self.id = id
+        self.handle = handle
+        self.displayName = displayName
+        self.avatarColor = avatarColor
+        self.bio = bio
+        self.friendshipStatus = friendshipStatus
+        self.friendshipId = friendshipId
+    }
+}
+
+public struct FriendRequestRecord: Codable, Sendable, Identifiable, Equatable {
+    public var id: String
+    public var requesterId: String
+    public var requesterHandle: String
+    public var requesterName: String
+    public var requesterAvatarColor: String
+    public var addresseeId: String
+    public var addresseeHandle: String
+    public var addresseeName: String
+    public var addresseeAvatarColor: String
+    public var status: String
+    public var createdAt: String
+    public var updatedAt: String
+}
+
+public struct SocialFeedItem: Codable, Sendable, Identifiable, Equatable {
+    public var id: String
+    public var actorId: String
+    public var actorHandle: String
+    public var actorName: String
+    public var actorAvatarColor: String
+    public var targetUserId: String?
+    public var targetHandle: String?
+    public var targetName: String?
+    public var kind: String
+    public var summary: String
+    public var bundleId: String?
+    public var createdAt: String
+}
+
+public struct SocialOverview: Codable, Sendable, Equatable {
+    public var friends: [DirectoryUser]
+    public var incomingRequests: [FriendRequestRecord]
+    public var outgoingRequests: [FriendRequestRecord]
+    public var suggestions: [DirectoryUser]
+    public var feed: [SocialFeedItem]
 }
 
 public struct SmartScopeRule: Codable, Sendable, Identifiable, Equatable {
@@ -418,6 +487,16 @@ public struct ChatActionCard: Codable, Sendable, Equatable {
     public var bundle: TransferBundle?
     public var accessRequest: AccessRequest?
     public var requiresConfirmation: Bool
+    /// Why a voice send is waiting for confirmation (`send_confirmation` cards).
+    public var holdReason: String?
+    /// `false` when a held send includes private items: confirm in the app, not with a band tap.
+    public var bandConfirmable: Bool?
+    /// `"vexo"` when the request came from Vexo #69.
+    public var source: String?
+
+    public var isPendingSendConfirmation: Bool {
+        actionType == "send_confirmation" && requiresConfirmation
+    }
 }
 
 public struct ChatMessage: Codable, Sendable, Identifiable, Equatable {

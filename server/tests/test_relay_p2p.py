@@ -6,6 +6,80 @@ from fastapi.testclient import TestClient
 from app.main import create_app
 
 
+def test_received_files_are_searchable_without_library_access(tmp_path: Path) -> None:
+    app = create_app(data_dir=tmp_path / "received_search")
+    with TestClient(app) as client:
+        def search(scope: str = "all", query: str = "tax return", **filters: object) -> list[dict]:
+            response = client.post(
+                "/api/search",
+                json={"user_id": "sarah", "query": query, "scope": scope, **filters},
+            )
+            assert response.status_code == 200
+            return response.json()
+
+        asset_id = "asset_tax_return_2025"
+        assert not any(hit["asset"]["id"] == asset_id for hit in search())
+
+        # Repeated shares appear once, using the most recent bundle's destination.
+        for title in ("Tax documents", "Latest tax documents"):
+            response = client.post(
+                "/api/send",
+                json={
+                    "sender_id": "mehmet",
+                    "asset_ids": [asset_id],
+                    "recipient_name": "Sarah",
+                    "recipient_user_id": "sarah",
+                    "channel": "fyde_direct",
+                    "title": title,
+                },
+            )
+            assert response.status_code == 200
+        bundle = response.json()
+
+        for scope in ("all", "contacts"):
+            hits = search(scope)
+            matches = [hit for hit in hits if hit["asset"]["id"] == asset_id]
+            assert len(matches) == 1
+            assert matches[0]["asset"]["owner_id"] == "mehmet"
+            assert matches[0]["asset"]["folder_path"] == "Received/Latest tax documents"
+            assert matches[0]["match_reason"].startswith("Received from Mehmet")
+            assert any(hit["asset"]["id"] == asset_id for hit in search(scope, ""))
+            assert any(hit["asset"]["id"] == asset_id for hit in search(scope, media_type="document"))
+            assert not any(hit["asset"]["id"] == asset_id for hit in search(scope, media_type="photo"))
+            assert not any(hit["asset"]["id"] == asset_id for hit in search(scope, contact_owner_id="maya"))
+        assert not any(hit["asset"]["id"] == asset_id for hit in search("mine"))
+        alex_hits = client.post(
+            "/api/search", json={"user_id": "alex", "query": "tax return", "scope": "all"}
+        ).json()
+        assert not any(hit["asset"]["id"] == asset_id for hit in alex_hits)
+
+        # Granting library access must not duplicate an already received file.
+        permission = client.post(
+            "/api/permissions",
+            json={"owner_id": "mehmet", "contact_user_id": "sarah", "contact_name": "Sarah", "tier": "trusted"},
+        )
+        assert permission.status_code == 200
+        for scope in ("all", "contacts"):
+            assert len([hit for hit in search(scope) if hit["asset"]["id"] == asset_id]) == 1
+
+        accepted = client.post(
+            f"/api/bundles/{bundle['id']}/accept",
+            json={"user_id": "sarah", "destination_type": "files", "album_or_folder": "Taxes"},
+        )
+        assert accepted.status_code == 200
+        source_url = bundle["items"][0]["download_url"]
+        assert len([hit for hit in search() if hit["asset"]["download_url"] == source_url]) == 1
+        assert any(hit["asset"]["download_url"] == source_url for hit in search("mine"))
+
+        # A received file remains searchable from its bundle if the sender's index disappears.
+        with app.state.storage._conn() as connection:
+            connection.execute("DELETE FROM assets WHERE id = ?", (asset_id,))
+        fallback = next(hit for hit in search("contacts") if hit["asset"]["id"] == asset_id)
+        assert fallback["asset"]["download_url"] == bundle["items"][0]["download_url"]
+        assert "Taxes" in fallback["asset"]["folder_path"]
+        assert fallback["match_reason"].startswith("Received from Mehmet")
+
+
 def test_full_fyde_p2p_multimodal_and_permissions_flow(tmp_path: Path) -> None:
     app = create_app(data_dir=tmp_path / "fyde_test_data")
     with TestClient(app) as client:

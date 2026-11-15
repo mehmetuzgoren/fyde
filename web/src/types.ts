@@ -11,11 +11,60 @@ export interface UserProfile {
   email: string;
   phone: string;
   avatar_color: string;
+  bio?: string;
   auth_provider?: string;
   plan_tier?: PlanTier;
   billing_interval?: string;
   subscription_status?: string;
   auto_save_trusted_to_photos: boolean;
+}
+
+export interface DirectoryUser {
+  id: string;
+  handle: string;
+  display_name: string;
+  avatar_color: string;
+  bio: string;
+  friendship_status: "none" | "pending_outgoing" | "pending_incoming" | "accepted";
+  friendship_id?: string | null;
+}
+
+export interface FriendRequestRecord {
+  id: string;
+  requester_id: string;
+  requester_handle: string;
+  requester_name: string;
+  requester_avatar_color: string;
+  addressee_id: string;
+  addressee_handle: string;
+  addressee_name: string;
+  addressee_avatar_color: string;
+  status: "pending" | "accepted" | "declined";
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SocialFeedItem {
+  id: string;
+  actor_id: string;
+  actor_handle: string;
+  actor_name: string;
+  actor_avatar_color: string;
+  target_user_id?: string | null;
+  target_handle?: string | null;
+  target_name?: string | null;
+  kind: string;
+  summary: string;
+  bundle_id?: string | null;
+  created_at: string;
+}
+
+export interface SocialOverview {
+  friends: DirectoryUser[];
+  incoming_requests: FriendRequestRecord[];
+  outgoing_requests: FriendRequestRecord[];
+  suggestions: DirectoryUser[];
+  feed: SocialFeedItem[];
 }
 
 export interface PlanDefinition {
@@ -146,6 +195,11 @@ export interface ChatActionCard {
   permission?: ContactPermission | null;
   bundle?: TransferBundle | null;
   access_request?: AccessRequest | null;
+  requires_confirmation?: boolean;
+  /** Why a voice send is waiting for confirmation (send_confirmation cards). */
+  hold_reason?: string | null;
+  band_confirmable?: boolean;
+  source?: string | null;
 }
 
 export interface ChatMessage {

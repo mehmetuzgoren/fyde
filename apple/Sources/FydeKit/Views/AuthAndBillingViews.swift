@@ -1,10 +1,11 @@
 import AuthenticationServices
 import SwiftUI
 
+/// Legacy brand names, kept as aliases of the Paper tokens in `FydeTheme`.
 public enum FydeBrand {
-    public static let cream = Color(red: 248.0 / 255.0, green: 249.0 / 255.0, blue: 244.0 / 255.0)
-    public static let forestInk = Color(red: 41.0 / 255.0, green: 48.0 / 255.0, blue: 34.0 / 255.0)
-    public static let terracotta = Color(red: 191.0 / 255.0, green: 81.0 / 255.0, blue: 52.0 / 255.0)
+    public static let cream = FydeTheme.paper
+    public static let forestInk = FydeTheme.ink
+    public static let terracotta = FydeTheme.accent
 }
 
 public struct FydeWordmarkView: View {
@@ -31,304 +32,308 @@ public struct FydeWordmarkView: View {
 public struct FydeAuthGateView: View {
     @Bindable var store: FydeStore
     @Environment(\.openURL) private var openURL
+    @Environment(\.colorScheme) private var colorScheme
 
-    private enum AuthMode: String, CaseIterable, Identifiable {
-        case otp = "Email Code"
-        case password = "Password"
-        case waitlist = "Waitlist"
-        var id: String { rawValue }
+    private enum Mode: Hashable {
+        case signIn, signUp
     }
 
-    @State private var mode: AuthMode = .otp
-    @State private var isRegister = false
-    @State private var email = ""
-    @State private var displayName = ""
-    @State private var password = ""
-    @State private var inviteCode = ""
+    private enum Field: Hashable {
+        case email, handle, password
+    }
 
-    @State private var otpSent = false
-    @State private var otpCode = ""
-    @State private var devPreviewCode: String?
+    @State private var mode: Mode = .signIn
+    @State private var email = ""
+    @State private var handle = ""
+    @State private var password = ""
     @State private var messageBanner: String?
     @State private var isBusy = false
+    @FocusState private var focus: Field?
+
+    /// Native Sign in with Apple stops growing at 375pt on macOS, so the whole
+    /// column is capped below that to keep every control the same width.
+    private let columnWidth: CGFloat = 360
 
     public init(store: FydeStore) {
         self.store = store
     }
 
+    // MARK: Validation
+
+    /// Mirrors the edge's `normalizeHandle`: lowercase a–z, 0–9 and _, max 24.
+    private static func normalizeHandle(_ raw: String) -> String {
+        let allowed = Set("abcdefghijklmnopqrstuvwxyz0123456789_")
+        return String(raw.lowercased().filter { allowed.contains($0) }.prefix(24))
+    }
+
+    private var trimmedEmail: String {
+        email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    private var emailLooksValid: Bool {
+        let parts = trimmedEmail.split(separator: "@")
+        return parts.count == 2 && parts[1].contains(".")
+    }
+
+    private var canSubmit: Bool {
+        guard !isBusy else { return false }
+        switch mode {
+        case .signIn:
+            return !handle.isEmpty && !password.isEmpty
+        case .signUp:
+            return emailLooksValid && handle.count >= 3 && password.count >= 6
+        }
+    }
+
+    // MARK: Body
+
     public var body: some View {
         ScrollView {
-            VStack(spacing: 22) {
-                // Brand Header
+            VStack(spacing: 28) {
                 VStack(spacing: 10) {
                     FydeWordmarkView(size: 44)
                     Text("Search by memory. Share in a sentence.")
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(.secondary)
+                        .font(.subheadline)
+                        .foregroundStyle(FydeTheme.inkSecondary)
                         .multilineTextAlignment(.center)
                 }
-                .padding(.top, 28)
+                .padding(.top, 44)
 
-                // Main Auth Card
-                VStack(alignment: .leading, spacing: 16) {
-                    // Sign in with Apple (Native AuthenticationServices)
-                    SignInWithAppleButton(.signIn) { request in
-                        request.requestedScopes = [.fullName, .email]
-                    } onCompletion: { result in
-                        handleAppleResult(result)
-                    }
-                    .signInWithAppleButtonStyle(.black)
-                    .frame(height: 46)
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
-
-                    // Continue with Google
-                    Button {
-                        if let url = URL(string: "\(store.relayBaseURL)/api/auth/google/start") {
-                            openURL(url)
-                        }
-                    } label: {
-                        HStack(spacing: 8) {
-                            Text("G")
-                                .font(.headline.weight(.black))
-                                .foregroundStyle(FydeBrand.terracotta)
-                            Text("Continue with Google")
-                                .font(.subheadline.weight(.semibold))
-                                .foregroundStyle(.primary)
-                        }
-                        .frame(maxWidth: .infinity, minHeight: 44)
-                        .background(
-                            RoundedRectangle(cornerRadius: 12)
-                                .strokeBorder(Color.secondary.opacity(0.3), lineWidth: 1)
-                        )
-                    }
-                    .buttonStyle(.plain)
-
-                    Picker("Method", selection: $mode) {
-                        ForEach(AuthMode.allCases) { m in
-                            Text(m.rawValue).tag(m)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-
+                VStack(spacing: 12) {
+                    appleButton
+                    googleButton
+                    orDivider
+                    fields
                     if let msg = messageBanner {
-                        Text(msg)
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(FydeBrand.terracotta)
-                            .padding(10)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(FydeBrand.terracotta.opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
+                        banner(msg)
                     }
-
-                    switch mode {
-                    case .otp:
-                        otpSection
-                    case .password:
-                        passwordSection
-                    case .waitlist:
-                        waitlistSection
-                    }
+                    submitButton
+                    modeSwitch
                 }
+                .frame(maxWidth: columnWidth)
                 .padding(22)
-                .background(.background, in: RoundedRectangle(cornerRadius: 22))
+                .background(FydeTheme.surface, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 22)
-                        .strokeBorder(FydeBrand.forestInk.opacity(0.12), lineWidth: 1)
+                    RoundedRectangle(cornerRadius: 24, style: .continuous)
+                        .strokeBorder(FydeTheme.line, lineWidth: 1)
                 )
-                .frame(maxWidth: 460)
-
-                // Quick Sandbox Peer Switcher
-                VStack(spacing: 10) {
-                    Text("INSTANT P2P PREVIEW ACCOUNTS")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.secondary)
-
-                    HStack(spacing: 8) {
-                        ForEach(["mehmet", "maya", "alex"], id: \.self) { handle in
-                            Button {
-                                Task { await store.signInDemo(handle: handle) }
-                            } label: {
-                                Text("@\(handle)")
-                                    .font(.caption.weight(.semibold))
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 7)
-                                    .background(FydeBrand.forestInk.opacity(0.08), in: Capsule())
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                }
-
-                // Relay Edge Endpoint Selector
-                VStack(spacing: 6) {
-                    HStack(spacing: 8) {
-                        Button("Local Edge (:8787)") {
-                            store.relayBaseURL = "http://127.0.0.1:8787"
-                        }
-                        .font(.caption2.weight(.semibold))
-
-                        Text("•").foregroundStyle(.secondary)
-
-                        Button("fyde.izbirakin.com") {
-                            store.relayBaseURL = "https://fyde.izbirakin.com"
-                        }
-                        .font(.caption2.weight(.semibold))
-                    }
-                    Text("Active Edge: \(store.relayBaseURL)")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
+                .shadow(color: Color.black.opacity(0.04), radius: 14, y: 4)
                 .padding(.bottom, 28)
             }
             .padding(.horizontal, 20)
             .frame(maxWidth: .infinity)
         }
-        .background(FydeBrand.cream.ignoresSafeArea())
+        .scrollDismissesKeyboard(.interactively)
+        .background(FydeTheme.paper.ignoresSafeArea())
+        .tint(FydeTheme.accent)
+        .animation(.easeOut(duration: 0.2), value: mode)
+        .animation(.easeOut(duration: 0.2), value: messageBanner)
     }
+
+    // MARK: Social
+
+    private var appleButton: some View {
+        SignInWithAppleButton(mode == .signUp ? .signUp : .signIn) { request in
+            request.requestedScopes = [.fullName, .email]
+        } onCompletion: { result in
+            handleAppleResult(result)
+        }
+        .signInWithAppleButtonStyle(colorScheme == .dark ? .white : .black)
+        .frame(maxWidth: .infinity)
+        .frame(height: 48)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .id("apple-\(mode == .signUp)-\(colorScheme == .dark)")
+    }
+
+    private var googleButton: some View {
+        Button {
+            if let url = URL(string: "\(store.relayBaseURL)/api/auth/google/start") {
+                openURL(url)
+            }
+        } label: {
+            HStack(spacing: 10) {
+                Text("G")
+                    .font(.system(size: 18, weight: .bold, design: .rounded))
+                    .foregroundStyle(FydeTheme.accent)
+                Text(mode == .signUp ? "Sign up with Google" : "Sign in with Google")
+                    .font(.system(size: 17, weight: .medium))
+                    .foregroundStyle(FydeTheme.ink)
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 48)
+            .background(FydeTheme.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(FydeTheme.line, lineWidth: 1)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var orDivider: some View {
+        HStack(spacing: 12) {
+            Rectangle().fill(FydeTheme.line).frame(height: 1)
+            Text("or")
+                .font(.footnote)
+                .foregroundStyle(FydeTheme.muted)
+            Rectangle().fill(FydeTheme.line).frame(height: 1)
+        }
+        .padding(.vertical, 6)
+    }
+
+    // MARK: Fields
 
     @ViewBuilder
-    private var otpSection: some View {
-        if !otpSent {
-            VStack(spacing: 10) {
-                emailField("you@izbirakin.com")
-                Button {
-                    Task {
-                        isBusy = true
-                        let res = await store.sendEmailOTP(email: email)
-                        isBusy = false
-                        if res.sent {
-                            otpSent = true
-                            devPreviewCode = res.previewHint
-                            messageBanner = nil
-                        } else {
-                            messageBanner = res.error
-                        }
-                    }
-                } label: {
-                    primaryLabel(isBusy ? "Sending Code…" : "Send 6-Digit Email Code")
-                }
-                .buttonStyle(.plain)
-                .disabled(email.isEmpty || isBusy)
+    private var fields: some View {
+        if mode == .signUp {
+            fieldBox(icon: "envelope", field: .email) {
+                TextField("Email", text: $email)
+                    .textFieldStyle(.plain)
+                    .autocorrectionDisabled()
+                    #if os(iOS)
+                    .textInputAutocapitalization(.never)
+                    .keyboardType(.emailAddress)
+                    .textContentType(.emailAddress)
+                    #endif
+                    .focused($focus, equals: .email)
+                    .submitLabel(.next)
+                    .onSubmit { focus = .handle }
             }
-        } else {
-            VStack(alignment: .leading, spacing: 10) {
-                if let hint = devPreviewCode {
-                    HStack {
-                        Text("Preview Code: \(hint)")
-                            .font(.caption.monospaced().bold())
-                        Spacer()
-                        Button("Autofill") {
-                            otpCode = hint
-                        }
-                        .font(.caption.bold())
-                        .foregroundStyle(FydeBrand.terracotta)
-                    }
-                    .padding(8)
-                    .background(FydeBrand.forestInk.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
-                }
-                TextField("6-Digit Code", text: $otpCode)
-                    .textFieldStyle(.roundedBorder)
-                TextField("Display Name (optional)", text: $displayName)
-                    .textFieldStyle(.roundedBorder)
-                HStack(spacing: 8) {
-                    Button {
-                        Task {
-                            isBusy = true
-                            messageBanner = await store.verifyEmailOTP(email: email, code: otpCode, displayName: displayName)
-                            isBusy = false
-                        }
-                    } label: {
-                        primaryLabel(isBusy ? "Verifying…" : "Verify & Sign In")
-                    }
-                    .buttonStyle(.plain)
+            .transition(.move(edge: .top).combined(with: .opacity))
+        }
 
-                    Button("Back") {
-                        otpSent = false
-                        devPreviewCode = nil
-                    }
-                    .buttonStyle(.bordered)
+        fieldBox(icon: "at", field: .handle) {
+            TextField(mode == .signUp ? "Choose a handle" : "Handle", text: $handle)
+                .textFieldStyle(.plain)
+                .autocorrectionDisabled()
+                #if os(iOS)
+                .textInputAutocapitalization(.never)
+                .textContentType(.username)
+                #endif
+                .focused($focus, equals: .handle)
+                .submitLabel(.next)
+                .onSubmit { focus = .password }
+                .onChange(of: handle) { _, newValue in
+                    let cleaned = Self.normalizeHandle(newValue)
+                    if cleaned != newValue { handle = cleaned }
                 }
-            }
+        }
+
+        fieldBox(icon: "lock", field: .password) {
+            SecureField(mode == .signUp ? "Password (6+ characters)" : "Password", text: $password)
+                .textFieldStyle(.plain)
+                #if os(iOS)
+                .textContentType(mode == .signUp ? .newPassword : .password)
+                #endif
+                .focused($focus, equals: .password)
+                .submitLabel(.go)
+                .onSubmit(submit)
         }
     }
 
-    private var passwordSection: some View {
-        VStack(spacing: 10) {
-            if isRegister {
-                TextField("Display Name", text: $displayName)
-                    .textFieldStyle(.roundedBorder)
-            }
-            emailField("Email or @handle")
-            SecureField("Password (6+ chars)", text: $password)
-                .textFieldStyle(.roundedBorder)
-            if isRegister {
-                TextField("Waitlist Invite Code (optional)", text: $inviteCode)
-                    .textFieldStyle(.roundedBorder)
-            }
-            Button {
-                Task {
-                    isBusy = true
-                    messageBanner = await store.authenticateWithPassword(
-                        email: email,
-                        password: password,
-                        displayName: displayName,
-                        inviteCode: inviteCode,
-                        isRegister: isRegister
-                    )
-                    isBusy = false
-                }
-            } label: {
-                primaryLabel(isBusy ? "Signing in…" : (isRegister ? "Create Account" : "Sign In"))
-            }
-            .buttonStyle(.plain)
-            .disabled(email.isEmpty || password.isEmpty || isBusy)
-
-            Button(isRegister ? "Have an account? Sign in" : "New to fyde.? Create password account") {
-                isRegister.toggle()
-            }
-            .font(.caption.weight(.semibold))
-            .buttonStyle(.plain)
+    private func fieldBox<Content: View>(icon: String, field: Field, @ViewBuilder content: () -> Content) -> some View {
+        let isFocused = focus == field
+        return HStack(spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(isFocused ? FydeTheme.accent : FydeTheme.muted)
+                .frame(width: 18)
+            content()
+                .font(.body)
+                .foregroundStyle(FydeTheme.ink)
         }
+        .padding(.horizontal, 14)
+        .frame(height: 48)
+        .background(FydeTheme.paper, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(isFocused ? FydeTheme.accent.opacity(0.5) : FydeTheme.line, lineWidth: 1)
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .onTapGesture { focus = field }
     }
 
-    private var waitlistSection: some View {
-        VStack(spacing: 10) {
-            TextField("First Name", text: $displayName)
-                .textFieldStyle(.roundedBorder)
-            emailField("Enter email for TestFlight & Web access")
-            Button {
-                Task {
-                    isBusy = true
-                    messageBanner = await store.joinWaitlist(email: email, name: displayName)
-                    isBusy = false
+    private func banner(_ text: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "exclamationmark.circle.fill")
+                .font(.footnote)
+            Text(text)
+                .font(.footnote.weight(.medium))
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .foregroundStyle(FydeTheme.accent)
+        .padding(12)
+        .background(FydeTheme.accentSoft, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .transition(.opacity)
+    }
+
+    // MARK: Actions
+
+    private var submitButton: some View {
+        Button(action: submit) {
+            HStack(spacing: 8) {
+                if isBusy {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(.white)
                 }
-            } label: {
-                Text(isBusy ? "Joining…" : "Reserve Spot on fyde.izbirakin.com")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .frame(maxWidth: .infinity, minHeight: 42)
-                    .background(FydeBrand.terracotta, in: RoundedRectangle(cornerRadius: 11))
+                Text(mode == .signUp ? "Create account" : "Sign in")
+            }
+            .frame(height: 48)
+        }
+        .buttonStyle(FydePrimaryButtonStyle())
+        .disabled(!canSubmit)
+        .padding(.top, 4)
+    }
+
+    private var modeSwitch: some View {
+        HStack(spacing: 4) {
+            Text(mode == .signIn ? "New to fyde?" : "Already have an account?")
+                .foregroundStyle(FydeTheme.inkSecondary)
+            Button(mode == .signIn ? "Sign up" : "Sign in") {
+                messageBanner = nil
+                focus = nil
+                mode = (mode == .signIn) ? .signUp : .signIn
             }
             .buttonStyle(.plain)
-            .disabled(email.isEmpty || isBusy)
+            .fontWeight(.semibold)
+            .foregroundStyle(FydeTheme.accent)
         }
+        .font(.footnote)
+        .padding(.top, 4)
     }
 
-    private func emailField(_ placeholder: String) -> some View {
-        TextField(placeholder, text: $email)
-            .textFieldStyle(.roundedBorder)
-            .autocorrectionDisabled()
-            #if os(iOS)
-            .textInputAutocapitalization(.never)
-            .keyboardType(.emailAddress)
-            #endif
-    }
-
-    private func primaryLabel(_ text: String) -> some View {
-        Text(text)
-            .font(.subheadline.weight(.semibold))
-            .foregroundStyle(FydeBrand.cream)
-            .frame(maxWidth: .infinity, minHeight: 42)
-            .background(FydeBrand.forestInk, in: RoundedRectangle(cornerRadius: 11))
+    private func submit() {
+        guard canSubmit else { return }
+        focus = nil
+        let currentMode = mode
+        let currentEmail = trimmedEmail
+        let currentHandle = handle
+        let currentPassword = password
+        Task {
+            isBusy = true
+            messageBanner = nil
+            let error: String?
+            switch currentMode {
+            case .signIn:
+                // The edge's /api/auth/login accepts a handle in its `email` field.
+                error = await store.authenticateWithPassword(
+                    email: currentHandle,
+                    password: currentPassword,
+                    isRegister: false
+                )
+            case .signUp:
+                error = await store.authenticateWithPassword(
+                    email: currentEmail,
+                    password: currentPassword,
+                    handle: currentHandle,
+                    isRegister: true
+                )
+            }
+            isBusy = false
+            messageBanner = error
+        }
     }
 
     private func handleAppleResult(_ result: Result<ASAuthorization, any Error>) {
@@ -352,6 +357,9 @@ public struct FydeAuthGateView: View {
                 )
             }
         case .failure(let err):
+            if let authErr = err as? ASAuthorizationError, authErr.code == .canceled {
+                return
+            }
             messageBanner = err.localizedDescription
         }
     }
