@@ -1,6 +1,7 @@
 import SwiftUI
 
 public struct FydeRootView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @Bindable var store: FydeStore
     @State private var showSettings = false
     @State private var showBilling = false
@@ -49,6 +50,11 @@ public struct FydeRootView: View {
         .animation(.spring(duration: 0.35), value: store.statusBanner)
         .task {
             await store.bootstrap()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                Task { await store.resumeFromBackground() }
+            }
         }
         .sheet(isPresented: $showSettings) {
             FydeSettingsSheet(

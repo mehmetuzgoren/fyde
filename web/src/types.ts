@@ -207,6 +207,8 @@ export interface ChatMessage {
   user_id: string;
   role: "user" | "assistant" | "system";
   text: string;
+  source?: string | null;
+  client_message_id?: string | null;
   action_card?: ChatActionCard | null;
   created_at: string;
 }

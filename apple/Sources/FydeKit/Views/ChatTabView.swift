@@ -432,6 +432,12 @@ private struct UserMessageRow: View {
         HStack {
             Spacer(minLength: 56)
             VStack(alignment: .trailing, spacing: 4) {
+                if message.source == "vexo" {
+                    Label("Vexo #69", systemImage: "waveform")
+                        .font(.caption2)
+                        .foregroundStyle(FydeTheme.muted)
+                        .padding(.trailing, 4)
+                }
                 Text(.init(message.text))
                     .font(.callout)
                     .foregroundStyle(.white)
@@ -458,7 +464,7 @@ private struct UserMessageRow: View {
             }
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("You said: \(message.text)")
+        .accessibilityLabel("\(message.source == "vexo" ? "Vexo #69" : "You") said: \(message.text)")
     }
 }
 

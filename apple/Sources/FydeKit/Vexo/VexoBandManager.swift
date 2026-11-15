@@ -1,6 +1,9 @@
 import Foundation
 import Observation
 @preconcurrency import CoreBluetooth
+#if os(iOS)
+import UIKit
+#endif
 
 public enum VexoTransportKind: String, CaseIterable, Sendable, Identifiable {
     case bluetooth = "bluetooth"
@@ -144,6 +147,9 @@ public final class VexoBandManager {
     // Shake detection rolling buffer (0.5 s @ 50 Hz = 25 samples, threshold 1.5 g per AGENTS.md)
     private var recentMagnitudesG: [Double] = []
     private var shakeQuietUntil: Date = .distantPast
+    #if os(iOS)
+    private var voiceBackgroundTask: UIBackgroundTaskIdentifier = .invalid
+    #endif
 
     public init() {
         if let savedBridge = UserDefaults.standard.string(forKey: "fyde.vexo.macBridgeURL"), !savedBridge.isEmpty {
@@ -155,6 +161,11 @@ public final class VexoBandManager {
             self.deepgramApiKeyInMemory = envKey
         }
         wireDrivers()
+        #if os(iOS)
+        if UserDefaults.standard.bool(forKey: "fyde.vexo.backgroundBluetooth") {
+            bleDriver.prepareForRestoration()
+        }
+        #endif
     }
 
     private var effectiveDeepgramKey: String {
@@ -176,6 +187,7 @@ public final class VexoBandManager {
 
         switch transportKind {
         case .bluetooth:
+            UserDefaults.standard.set(true, forKey: "fyde.vexo.backgroundBluetooth")
             await connectBluetooth()
         case .macBridge:
             await connectMacBridge()
@@ -185,6 +197,8 @@ public final class VexoBandManager {
     }
 
     public func disconnect() {
+        UserDefaults.standard.set(false, forKey: "fyde.vexo.backgroundBluetooth")
+        endVoiceBackgroundTask()
         userInitiatedDisconnect = true
         reconnectTask?.cancel()
         reconnectTask = nil
@@ -501,6 +515,10 @@ public final class VexoBandManager {
             return
         }
         guard !isListeningVoice else { return }
+        beginVoiceBackgroundTask()
+        defer {
+            if !isListeningVoice { endVoiceBackgroundTask() }
+        }
         lastError = nil
         liveTranscript = ""
         audioPacketsReceived = 0
@@ -548,6 +566,7 @@ public final class VexoBandManager {
 
     public func stopVoiceListeningAndDispatch(submit: Bool) async {
         guard isListeningVoice else { return }
+        defer { endVoiceBackgroundTask() }
         voiceAutoStopTask?.cancel()
         voiceAutoStopTask = nil
         isListeningVoice = false
@@ -589,6 +608,27 @@ public final class VexoBandManager {
                 ? "No speech detected on \(bandName). Speak within arm's length while the LED is solid blue."
                 : "Captured from \(bandName): \"\(finalWords)\""
         }
+    }
+
+    private func beginVoiceBackgroundTask() {
+        #if os(iOS)
+        guard voiceBackgroundTask == .invalid else { return }
+        voiceBackgroundTask = UIApplication.shared.beginBackgroundTask(withName: "Vexo voice command") { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                self.endVoiceBackgroundTask()
+                await self.stopVoiceListeningAndDispatch(submit: self.voiceAutoSendToChat)
+            }
+        }
+        #endif
+    }
+
+    private func endVoiceBackgroundTask() {
+        #if os(iOS)
+        guard voiceBackgroundTask != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(voiceBackgroundTask)
+        voiceBackgroundTask = .invalid
+        #endif
     }
 
     // MARK: - Simulator Gesture & Voice Injection Helpers
@@ -633,6 +673,7 @@ public final class VexoBandManager {
         }
         bleDriver.onTransportReady = { [weak self] in
             guard let self else { return }
+            self.transportKind = .bluetooth
             Task { await self.completeHandshakeAndConfigure() }
         }
         bleDriver.onFrameReceived = { [weak self] data in
@@ -797,6 +838,7 @@ public final class VexoBandManager {
     }
 
     private func handleTransportDropped(reason: String) {
+        endVoiceBackgroundTask()
         resetSessionTelemetry()
         if isListeningVoice {
             isListeningVoice = false
@@ -950,12 +992,23 @@ private final class VexoCoreBluetoothDriver: NSObject, CBCentralManagerDelegate,
     func startScanAndConnect() {
         wantsScan = true
         if central == nil {
-            central = CBCentralManager(delegate: self, queue: .main)
+            prepareForRestoration()
             return
         }
         if let central {
             evaluateCentralStateAndScan(central)
         }
+    }
+
+    func prepareForRestoration() {
+        guard central == nil else { return }
+        #if os(iOS)
+        central = CBCentralManager(delegate: self, queue: .main, options: [
+            CBCentralManagerOptionRestoreIdentifierKey: "com.fydefiles.vexo.band69"
+        ])
+        #else
+        central = CBCentralManager(delegate: self, queue: .main)
+        #endif
     }
 
     func writeCommand(_ frame: Data) {
@@ -1026,6 +1079,24 @@ private final class VexoCoreBluetoothDriver: NSObject, CBCentralManagerDelegate,
     }
 
     // MARK: - CBCentralManagerDelegate
+
+    func centralManager(_ central: CBCentralManager, willRestoreState dict: [String: Any]) {
+        let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral] ?? []
+        for peripheral in peripherals {
+            guard peripheral.name == VexoBandConstants.assignedBandName else {
+                central.cancelPeripheralConnection(peripheral)
+                continue
+            }
+            connectedPeripheral = peripheral
+            peripheral.delegate = self
+            if peripheral.state == .connected {
+                // Subscribe, then completeHandshakeAndConfigure verifies GET_INFO before settings.
+                peripheral.discoverServices([serviceUUID])
+            } else {
+                central.connect(peripheral)
+            }
+        }
+    }
 
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         evaluateCentralStateAndScan(central)
@@ -1111,7 +1182,11 @@ private final class VexoCoreBluetoothDriver: NSObject, CBCentralManagerDelegate,
             return
         }
         // Contract §2.1: Subscribe to TX notifications ONCE before sending the first command!
-        peripheral.setNotifyValue(true, for: tx)
+        if tx.isNotifying {
+            Task { @MainActor in self.onTransportReady?() }
+        } else {
+            peripheral.setNotifyValue(true, for: tx)
+        }
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {

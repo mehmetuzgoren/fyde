@@ -27,7 +27,10 @@ import base64
 import hashlib
 import json
 import os
+import plistlib
+from pathlib import Path
 import struct
+import subprocess
 import sys
 import threading
 import urllib.error
@@ -50,6 +53,7 @@ from config import (  # noqa: E402
     DEFAULT_BRIDGE_PORT,
     DEFAULT_FYDE_RELAY_URL,
     DEFAULT_FYDE_USER_ID,
+    read_environment,
 )
 
 from vexo_open import codec  # noqa: E402
@@ -87,6 +91,9 @@ def open_band69(args: argparse.Namespace, auto_reconnect: bool = False) -> Band:
 def fyde_http_json(method: str, url: str, payload: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
     headers = {"Accept": "application/json"}
+    token = os.environ.get("FYDE_SESSION_TOKEN", "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     if data is not None:
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
@@ -106,6 +113,24 @@ def dispatch_voice_to_fyde(relay_url: str, user_id: str, spoken_text: str) -> di
         "auto_send": True,
     }
     return fyde_http_json("POST", f"{relay_url}/api/chat", body)
+
+
+def verify_fyde_session(relay_url: str, user_id: str) -> str:
+    """Fail before opening the mic if the standalone listener has no valid account."""
+    reply = fyde_http_json("GET", f"{relay_url}/api/auth/me")
+    user = reply.get("user") or {}
+    if not reply.get("authenticated") or (user_id and user_id not in (user.get("id"), user.get("handle"))):
+        raise VexoError("auth", "Set FYDE_SESSION_TOKEN and FYDE_USER_ID for your Fyde account in the untracked .env file.")
+    return str(user["id"])
+
+
+def show_microphone_notice() -> None:
+    notice = "Wrist audio is sent to Deepgram for transcription with model training disabled. Tell people near the band."
+    print(f"[Microphone active] {notice}", flush=True)
+    if sys.platform == "darwin":
+        # The login service has no terminal; keep the active-microphone notice visible.
+        script = 'on run argv\ndisplay notification (item 1 of argv) with title "Vexo #69 microphone active"\nend run'
+        subprocess.run(["osascript", "-e", script, notice], capture_output=True, check=False)
 
 
 def voice_reply_led(reply: dict[str, Any]) -> tuple[str, str, int]:
@@ -207,6 +232,8 @@ def cmd_led(args: argparse.Namespace) -> int:
 def cmd_listen(args: argparse.Namespace) -> int:
     import speech  # from vexo-open-kit/examples/python/speech.py
 
+    if args.send_to_fyde:
+        args.user = verify_fyde_session(args.relay, args.user)
     with open_band69(args) as band:
         if args.sim:
             print(f"[Sim {band.name}] Simulated transcript: 'Send my Kyoto ramen photos to Maya'")
@@ -226,13 +253,14 @@ def cmd_listen(args: argparse.Namespace) -> int:
 def cmd_watch(args: argparse.Namespace) -> int:
     import speech  # from vexo-open-kit/examples/python/speech.py
 
-    print(f"Connecting to {BAND_NAME} -> Fyde Relay ({args.relay}, user={args.user})...")
+    args.user = verify_fyde_session(args.relay, args.user)
+    print(f"Connecting to {BAND_NAME} -> Fyde Relay ({args.relay}, user={args.user})...", flush=True)
     with open_band69(args, auto_reconnect=not args.sim) as band:
         band.set_led("#ff5500", brightness=0.35, pattern="solid")
         band.configure(events=True, battery=True)
 
         listening_lock = threading.Lock()
-        active_ears: dict[str, Any] = {"ears": None, "audio_handler": None}
+        active_ears: dict[str, Any] = {"ears": None, "audio_handler": None, "timer": None, "timeout": None, "starting": False, "dispatching": False}
 
         def stop_and_send() -> None:
             with listening_lock:
@@ -242,6 +270,11 @@ def cmd_watch(args: argparse.Namespace) -> int:
                     return
                 active_ears["ears"] = None
                 active_ears["audio_handler"] = None
+                active_ears["dispatching"] = True
+                if active_ears["timer"] is not None:
+                    active_ears["timer"].cancel()
+                if active_ears["timeout"] is not None:
+                    active_ears["timeout"].cancel()
 
             if handler is not None:
                 band.off("audio", handler)
@@ -249,45 +282,95 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 band.configure(audio=False)
             except VexoError:
                 pass
-            words = ears.stop().strip()
-            print(f"\n[{BAND_NAME}] Heard: {words!r}")
             try:
-                band.set_led("#ff5500", brightness=0.35, pattern="solid")
-            except VexoError:
-                pass
-            if words:
+                words = ears.stop().strip()
+                print(f"\n[{BAND_NAME}] Heard: {words!r}")
                 try:
+                    band.set_led("#ff5500", brightness=0.35, pattern="solid")
+                except VexoError:
+                    pass  # LED feedback must not prevent a captured command from reaching chat.
+                if words:
                     reply = dispatch_voice_to_fyde(args.relay, args.user, words)
                     print(f"[Fyde] {str(reply.get('text') or '').replace('**', '')}")
                     color, pattern, period = voice_reply_led(reply)
                     band.set_led(color, brightness=0.6, pattern=pattern, period=period)
                     if pattern == "breathe" and color == "#ffbe00":
                         print(f"[{BAND_NAME}] Single-tap to send it, or ignore to leave it unsent.")
-                except (urllib.error.URLError, OSError) as exc:
-                    print(f"[Fyde] Could not reach relay at {args.relay}: {exc}", file=sys.stderr)
+            except (urllib.error.URLError, OSError, VexoError) as exc:
+                print(f"[Fyde] Command failed; check chat before retrying: {type(exc).__name__}", file=sys.stderr)
+                try:
+                    band.set_led("#ff2337", brightness=0.6, pattern="blink", period=300)
+                except VexoError:
+                    pass
+            finally:
+                with listening_lock:
+                    active_ears["dispatching"] = False
+
+        def on_transcript(text: str, final: bool) -> None:
+            # Finish after a complete sentence and a short pause; the app is not needed.
+            with listening_lock:
+                if active_ears["ears"] is None or not text.strip():
+                    return
+                if active_ears["timer"] is not None:
+                    active_ears["timer"].cancel()
+                active_ears["timer"] = None
+                if final:
+                    timer = threading.Timer(1.5, stop_and_send)
+                    timer.daemon = True
+                    active_ears["timer"] = timer
+                    timer.start()
 
         @band.on("double-tap")
         def _on_double_tap(_ev) -> None:
-            if active_ears["ears"] is not None:
+            with listening_lock:
+                if active_ears["starting"] or active_ears["dispatching"]:
+                    return
+                listening = active_ears["ears"] is not None
+                if not listening:
+                    active_ears["starting"] = True
+            if listening:
                 stop_and_send()
                 return
             print(f"\n[{BAND_NAME}] Double-tap -> starting wrist voice capture (double-tap again to send)...")
             try:
-                ears = speech.create()
-                ears.start(lambda text, final: print(f"  {'FINAL' if final else '...'}: {text}"))
+                show_microphone_notice()
+                ears = speech.create(endpointing=500)
+                ears.start(on_transcript)
                 audio_fn = lambda a: ears.feed(a.opus, a.seq)
-                band.on("audio", audio_fn)
-                band.configure(audio=True)  # hardware locks solid blue mic LED
                 with listening_lock:
                     active_ears["ears"] = ears
                     active_ears["audio_handler"] = audio_fn
+                    timer = threading.Timer(25.0, stop_and_send)
+                    timer.daemon = True
+                    active_ears["timeout"] = timer
+                band.on("audio", audio_fn)
+                band.configure(audio=True)  # hardware locks solid blue mic LED
+                timer.start()
             except VexoError as exc:
                 print(f"[{BAND_NAME}] Voice capture unavailable: {exc}", file=sys.stderr)
+                with listening_lock:
+                    failed_ears = active_ears["ears"]
+                    handler = active_ears["audio_handler"]
+                    active_ears["ears"] = None
+                    active_ears["audio_handler"] = None
+                    if active_ears["timeout"] is not None:
+                        active_ears["timeout"].cancel()
+                if handler is not None:
+                    band.off("audio", handler)
+                if failed_ears is not None:
+                    try:
+                        failed_ears.stop()
+                    except VexoError:
+                        pass
+            finally:
+                with listening_lock:
+                    active_ears["starting"] = False
 
         @band.on("tap")
         def _on_single_tap(_ev) -> None:
-            if active_ears["ears"] is not None:
-                return
+            with listening_lock:
+                if active_ears["ears"] is not None or active_ears["starting"] or active_ears["dispatching"]:
+                    return
             try:
                 # A held voice send (amber LED) takes priority over inbox approvals.
                 msg = confirm_pending_voice_send(args.relay, args.user) or approve_first_pending_fyde_request(
@@ -317,7 +400,72 @@ def cmd_watch(args: argparse.Namespace) -> int:
             f"  - Single-tap wrist : Send a held voice send (amber), else approve a pending request\n"
             f"  - Press Ctrl+C     : Disconnect cleanly"
         )
-        band.wait()
+        try:
+            band.wait()
+        finally:
+            # Stop the microphone on shutdown without executing an unfinished command.
+            with listening_lock:
+                ears = active_ears["ears"]
+                active_ears["ears"] = None
+                timer = active_ears["timer"]
+                if timer is not None:
+                    timer.cancel()
+                if active_ears["timeout"] is not None:
+                    active_ears["timeout"].cancel()
+            if ears is not None:
+                band.configure(audio=False)
+                ears.stop()
+    return 0
+
+
+def cmd_service(args: argparse.Namespace) -> int:
+    """Manage a per-user macOS listener independently of the Fyde app process."""
+    if sys.platform != "darwin":
+        raise VexoError("platform", "The login service requires macOS. Use the watch command on other systems.")
+    label = "com.fydefiles.vexo69"
+    domain = f"gui/{os.getuid()}"
+    path = Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
+    if args.action == "stop":
+        subprocess.run(["launchctl", "bootout", f"{domain}/{label}"], capture_output=True, check=False)
+        if path.exists():
+            path.unlink()
+        print("Stopped the Vexo #69 login listener.")
+        return 0
+    if args.action == "status":
+        result = subprocess.run(["launchctl", "print", f"{domain}/{label}"], capture_output=True, text=True)
+        # Never print launchctl's environment, which may include credentials.
+        print("Vexo #69 login listener is loaded." if result.returncode == 0 else "Vexo #69 login listener is stopped.")
+        return 0 if result.returncode == 0 else 1
+    saved = read_environment()
+    if not saved.get("DEEPGRAM_API_KEY") or not saved.get("FYDE_SESSION_TOKEN"):
+        raise VexoError("config", "The login listener needs DEEPGRAM_API_KEY and FYDE_SESSION_TOKEN in the untracked project .env so they remain available after login.")
+    args.user = verify_fyde_session(args.relay, args.user)
+    import speech
+    speech.find_key()  # Validate availability without logging or persisting the key.
+    logs = Path.home() / "Library" / "Logs" / "Fyde"
+    logs.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    command = [sys.executable, "-u", os.path.abspath(__file__), "watch", "--relay", args.relay, "--user", args.user]
+    if args.usb:
+        command.append("--usb")
+    if args.serial_port:
+        command += ["--serial-port", args.serial_port]
+    config = {
+        "Label": label,
+        "ProgramArguments": command,
+        "WorkingDirectory": REPO_ROOT,
+        "RunAtLoad": True,
+        "KeepAlive": True,
+        "ThrottleInterval": 15,
+        "StandardOutPath": str(logs / "vexo69.log"),
+        "StandardErrorPath": str(logs / "vexo69.log"),
+    }
+    # launchd restarts from the untracked .env; secrets never enter the plist.
+    path.write_bytes(plistlib.dumps(config))
+    path.chmod(0o600)
+    subprocess.run(["launchctl", "bootout", f"{domain}/{label}"], capture_output=True, check=False)
+    subprocess.run(["launchctl", "bootstrap", domain, str(path)], check=True)
+    print("Started Vexo #69 at login. Fyde can be closed; double-tap, speak, and pause to send. Results are saved in chat.")
     return 0
 
 
@@ -558,6 +706,12 @@ def build_parser() -> argparse.ArgumentParser:
     s_watch.add_argument("--relay", default=DEFAULT_FYDE_RELAY_URL, help="Fyde relay URL")
     s_watch.add_argument("--user", default=DEFAULT_FYDE_USER_ID, help="Fyde user handle")
     s_watch.set_defaults(func=cmd_watch)
+
+    s_service = sub.add_parser("service", parents=[common], help="Manage the standalone macOS login listener")
+    s_service.add_argument("action", choices=["start", "stop", "status"])
+    s_service.add_argument("--relay", default=DEFAULT_FYDE_RELAY_URL)
+    s_service.add_argument("--user", default=DEFAULT_FYDE_USER_ID)
+    s_service.set_defaults(func=cmd_service)
 
     s_bridge = sub.add_parser("bridge", parents=[common], help="Expose ws://127.0.0.1:8790 for Xcode iPhone Simulator")
     s_bridge.add_argument("--host", default=DEFAULT_BRIDGE_HOST)

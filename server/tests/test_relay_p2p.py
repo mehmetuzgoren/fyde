@@ -4,6 +4,43 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from app.main import create_app
+from app.models import ChatMessage
+
+
+def test_wrist_commands_persist_and_broadcast_both_chat_turns(tmp_path: Path) -> None:
+    app = create_app(data_dir=tmp_path / "wrist_history")
+    with TestClient(app) as client:
+        for i in range(85):
+            app.state.storage.append_chat_message(ChatMessage(
+                id=f"old_wrist_{i}", user_id="mehmet", role="user", text="Older chat",
+                created_at="2025-01-01T00:00:00.000Z",
+            ))
+
+        # The receiver posts without an app or a WebSocket connection.
+        payload = {"user_id": "mehmet", "text": "Send the China photos to Maya", "platform": "vexo-band-69", "source": "vexo", "client_message_id": "wrist_1"}
+        response = client.post("/api/chat", json=payload)
+        assert response.status_code == 200
+        reply = response.json()
+        assert reply["source"] == "vexo"
+        assert reply["action_card"]["action_type"] == "send_completed"
+        history = client.get("/api/chat/mehmet").json()
+        assert len(history) == 80
+        assert history[-2]["text"] == payload["text"]
+        assert history[-2]["client_message_id"] == "wrist_1"
+        assert history[-1]["id"] == reply["id"]
+
+        # An open app sees the transcript as well as the result of a later command.
+        with client.websocket_connect("/ws/mehmet?device_id=chat_history&platform=web") as socket:
+            assert socket.receive_json()["event"] == "connected"
+            response = client.post("/api/chat", json={**payload, "text": "Find my China photos", "client_message_id": "wrist_2"})
+            assert response.status_code == 200
+            turns = []
+            while len(turns) < 2:
+                event = socket.receive_json()
+                if event["event"] == "chat_message":
+                    turns.append(event["payload"])
+            assert [turn["role"] for turn in turns] == ["user", "assistant"]
+            assert all(turn["source"] == "vexo" for turn in turns)
 
 
 def test_received_files_are_searchable_without_library_access(tmp_path: Path) -> None:

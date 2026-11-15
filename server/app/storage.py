@@ -530,10 +530,10 @@ class FydeStorage:
     def list_chat_messages(self, user_id: str, limit: int = 80) -> list[ChatMessage]:
         with self._conn() as conn:
             rows = conn.execute(
-                "SELECT data FROM chat_messages WHERE user_id = ? ORDER BY created_at ASC LIMIT ?",
+                "SELECT data FROM chat_messages WHERE user_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?",
                 (user_id, limit),
             ).fetchall()
-        return [ChatMessage.model_validate_json(r["data"]) for r in rows]
+        return [ChatMessage.model_validate_json(r["data"]) for r in reversed(rows)]
 
     # ---------- Initial Demo Seed ----------
     def seed_if_empty(self) -> None:

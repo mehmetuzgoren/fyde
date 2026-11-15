@@ -1715,10 +1715,10 @@ export default {
     // Conversational Fyde Chat (`/api/chat`)
     if (path.startsWith("/api/chat/") && request.method === "GET") {
       const userId = decodeURIComponent(path.slice("/api/chat/".length));
-      const { results } = await env.DB.prepare("SELECT data FROM chat_messages WHERE user_id = ? ORDER BY created_at ASC LIMIT 80")
+      const { results } = await env.DB.prepare("SELECT data FROM chat_messages WHERE user_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 80")
         .bind(userId)
         .all();
-      return withCors(Response.json((results || []).map((r) => JSON.parse(String(r.data)))));
+      return withCors(Response.json((results || []).reverse().map((r) => JSON.parse(String(r.data)))));
     }
 
     // Band taps only confirm the newest fresh hold, including when the iPhone sends
@@ -1856,7 +1856,7 @@ export default {
     }
 
     if (path === "/api/chat" && request.method === "POST") {
-      const body = (await request.json()) as { user_id?: string; text: string; source?: string; platform?: string };
+      const body = (await request.json()) as { user_id?: string; text: string; source?: string; platform?: string; client_message_id?: string };
       const actor = await resolveActorUserId(request, env, body.user_id);
       if ("error" in actor) return withCors(actor.error, request);
       const userId = actor.userId;
@@ -1873,11 +1873,14 @@ export default {
         user_id: userId,
         role: "user",
         text: spokenText,
+        source: fromVexo ? "vexo" : null,
+        client_message_id: body.client_message_id || null,
         created_at: new Date().toISOString(),
       };
       await env.DB.prepare("INSERT INTO chat_messages (id, user_id, created_at, data) VALUES (?, ?, ?, ?)")
         .bind(userMsg.id, userId, userMsg.created_at, JSON.stringify(userMsg))
         .run();
+      await notifyUserHub(env, userId, "chat_message", userMsg);
 
       const perms = await listPermissions(env, userId);
       const { results: allUsers } = await env.DB.prepare("SELECT * FROM users").all();
@@ -2059,6 +2062,7 @@ export default {
         user_id: userId,
         role: "assistant",
         text: replyText,
+        source: fromVexo ? "vexo" : null,
         action_card: card,
         created_at: new Date().toISOString(),
       };

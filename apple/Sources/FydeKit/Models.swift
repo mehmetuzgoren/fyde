@@ -504,6 +504,8 @@ public struct ChatMessage: Codable, Sendable, Identifiable, Equatable {
     public var userId: String
     public var role: String
     public var text: String
+    public var source: String?
+    public var clientMessageId: String?
     public var actionCard: ChatActionCard?
     public var createdAt: String
 
@@ -512,6 +514,8 @@ public struct ChatMessage: Codable, Sendable, Identifiable, Equatable {
         userId: String,
         role: String,
         text: String,
+        source: String? = nil,
+        clientMessageId: String? = nil,
         actionCard: ChatActionCard? = nil,
         createdAt: String = ISO8601DateFormatter().string(from: Date())
     ) {
@@ -519,6 +523,8 @@ public struct ChatMessage: Codable, Sendable, Identifiable, Equatable {
         self.userId = userId
         self.role = role
         self.text = text
+        self.source = source
+        self.clientMessageId = clientMessageId
         self.actionCard = actionCard
         self.createdAt = createdAt
     }

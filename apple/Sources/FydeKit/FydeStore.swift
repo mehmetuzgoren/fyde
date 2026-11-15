@@ -561,11 +561,38 @@ public final class FydeStore {
     }
 
     public func loadChatHistory() async {
-        guard let url = URL(string: "\(relayBaseURL)/api/chat/\(currentUserId)") else { return }
-        if let (data, _) = try? await URLSession.shared.data(from: url),
+        let userId = currentUserId
+        guard let url = URL(string: "\(relayBaseURL)/api/chat/\(userId)") else { return }
+        if let (data, response) = try? await URLSession.shared.data(for: authorizedRequest(url: url)),
+           (response as? HTTPURLResponse)?.statusCode == 200,
+           currentUserId == userId,
            let decoded = try? FydeJSON.makeDecoder().decode([ChatMessage].self, from: data) {
-            chatMessages = decoded
+            chatMessages.removeAll { $0.userId != userId }
+            for message in decoded { receiveChatMessage(message) }
         }
+    }
+
+    /// Relay events and HTTP replies may contain the same turn. Match the sender's
+    /// optimistic ID as well so its transcript appears exactly once.
+    func receiveChatMessage(_ message: ChatMessage) {
+        guard message.userId == currentUserId else { return }
+        if let index = chatMessages.firstIndex(where: {
+            $0.id == message.id || (message.clientMessageId != nil && $0.id == message.clientMessageId)
+        }) {
+            chatMessages[index] = message
+        } else {
+            chatMessages.append(message)
+        }
+        chatMessages.sort {
+            (FydeFormat.date($0.createdAt) ?? .distantPast) < (FydeFormat.date($1.createdAt) ?? .distantPast)
+        }
+    }
+
+    public func resumeFromBackground() async {
+        guard isAuthenticated else { return }
+        connectWebSocket()
+        await loadChatHistory()
+        await loadReceivedInbox()
     }
 
     /// - Parameter source: `"vexo"` for wrist voice commands, so the relay gates sends on your permissions.
@@ -577,7 +604,7 @@ public final class FydeStore {
         defer { isSendingChat = false }
         let fromVexo = source == "vexo"
 
-        let optimistic = ChatMessage(userId: currentUserId, role: "user", text: trimmed)
+        let optimistic = ChatMessage(userId: currentUserId, role: "user", text: trimmed, source: source)
         chatMessages.append(optimistic)
 
         guard let url = URL(string: "\(relayBaseURL)/api/chat") else { return nil }
@@ -586,6 +613,7 @@ public final class FydeStore {
         var body: [String: Any] = [
             "user_id": currentUserId,
             "text": trimmed,
+            "client_message_id": optimistic.id,
             "platform": PlatformMediaBridge.currentPlatform,
             "auto_send": true
         ]
@@ -600,9 +628,7 @@ public final class FydeStore {
                 return nil
             }
             let reply = try FydeJSON.makeDecoder().decode(ChatMessage.self, from: data)
-            if !chatMessages.contains(where: { $0.id == reply.id }) {
-                chatMessages.append(reply)
-            }
+            receiveChatMessage(reply)
             if let card = reply.actionCard {
                 vexo.notifyFydeEventLED(kind: card.isPendingSendConfirmation ? .awaitingConfirmation : .actionSucceeded)
                 if fromVexo, card.isPendingSendConfirmation {
@@ -615,6 +641,7 @@ public final class FydeStore {
                 vexo.notifyFydeEventLED(kind: .attentionError)
                 statusBanner = reply.text.replacingOccurrences(of: "**", with: "")
             }
+            await loadChatHistory()
             await loadPermissions()
             await loadReceivedInbox()
             await loadMyAssets()
@@ -1030,9 +1057,9 @@ public final class FydeStore {
 
         wsListenerTask = Task { [weak self] in
             while !Task.isCancelled {
-                guard let self, let ws = self.webSocketTask else { break }
+                guard let self else { break }
                 do {
-                    let message = try await ws.receive()
+                    let message = try await task.receive()
                     if case .string(let text) = message,
                        let data = text.data(using: .utf8),
                        let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -1040,6 +1067,11 @@ public final class FydeStore {
                         await self.handleWebSocketEvent(event, payload: obj["payload"])
                     }
                 } catch {
+                    guard !Task.isCancelled, self.webSocketTask === task, self.isAuthenticated else { break }
+                    self.isRelayConnected = false
+                    try? await Task.sleep(for: .seconds(2))
+                    guard !Task.isCancelled, self.webSocketTask === task else { break }
+                    self.connectWebSocket()
                     break
                 }
             }
@@ -1057,6 +1089,7 @@ public final class FydeStore {
         switch event {
         case "connected":
             isRelayConnected = true
+            await loadChatHistory()
         case "bundle_received":
             vexo.notifyFydeEventLED(kind: .incomingBundleOrRequest)
             await loadReceivedInbox()
@@ -1102,13 +1135,14 @@ public final class FydeStore {
             statusBanner = "Contact request accepted — you can now @mention and share"
         case "social_feed_updated":
             await loadSocialOverview()
-        case "chat_message_updated":
-            // A held voice send was confirmed/cancelled (here, on the web, or from the Mac CLI).
+        case "chat_message", "chat_message_updated":
             if let dict = payload as? [String: Any],
                let raw = try? JSONSerialization.data(withJSONObject: dict),
-               let updated = try? FydeJSON.makeDecoder().decode(ChatMessage.self, from: raw),
-               let idx = chatMessages.firstIndex(where: { $0.id == updated.id }) {
-                chatMessages[idx] = updated
+               let message = try? FydeJSON.makeDecoder().decode(ChatMessage.self, from: raw) {
+                receiveChatMessage(message)
+                if message.role == "assistant", message.actionCard?.bundle != nil {
+                    await loadReceivedInbox()
+                }
             }
         case "imessage_bridge_job":
             #if os(macOS)

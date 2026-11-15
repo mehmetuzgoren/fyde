@@ -641,14 +641,18 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
         user = storage.get_user(req.user_id) or UserProfile(
             id=req.user_id, handle=req.user_id, display_name=req.user_id.title()
         )
+        source = "vexo" if req.source == "vexo" or req.platform == "vexo-band-69" else None
         user_msg = ChatMessage(
             id=f"msg_{uuid.uuid4().hex[:10]}",
             user_id=user.id,
             role="user",
             text=req.text,
+            source=source,
+            client_message_id=req.client_message_id,
             created_at=utc_now_iso(),
         )
         storage.append_chat_message(user_msg)
+        await hub.notify_user(user.id, "chat_message", user_msg.model_dump())
 
         # Gather known contacts + all users for natural language contact resolution
         perms = storage.list_permissions(user.id)
@@ -803,7 +807,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
                             recipient_name=parsed.target_person,
                             channel=parsed.channel,
                             message=f"Sent via Fyde Chat: {parsed.query}",
-                            sender_platform=req.platform,
+                            sender_platform="macos" if req.platform == "vexo-band-69" else req.platform,
                         )
                     )
                     channel_label = {
@@ -862,6 +866,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             user_id=user.id,
             role="assistant",
             text=reply_text,
+            source=source,
             action_card=card,
             created_at=utc_now_iso(),
         )

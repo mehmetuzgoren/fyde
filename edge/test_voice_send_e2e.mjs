@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { once } from "node:events";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 // Runs inside the existing edge E2E worker, using its isolated D1 and R2 state.
 export async function runVoiceSendScenarios(base, executeSql) {
@@ -146,5 +150,53 @@ export async function runVoiceSendScenarios(base, executeSql) {
   const email = await chat("Hey Vexo, can you send the Great Wall photo to Maya by email?");
   assert.equal(email.action_card.channel, "email");
   assert.equal(type(await chat("Vexo, find my China photos")), "search_results");
+
+  // A separate receiver submits while Fyde is closed. Both turns must survive a
+  // later history fetch, even after the conversation has passed its 80-row window.
+  await executeSql(`
+    INSERT INTO users (id, handle, display_name, email, created_at)
+    VALUES ('voice_johnny', 'johnny', 'Johnny', 'johnny@voice.test', ${quote(new Date().toISOString())});
+    ${Array.from({ length: 85 }, (_, i) => {
+      const message = { id: `old_voice_${i}`, user_id: "mehmet", role: "user", text: "Older chat", created_at: "2025-01-01T00:00:00.000Z" };
+      return `INSERT INTO chat_messages (id, user_id, created_at, data) VALUES (${quote(message.id)}, 'mehmet', ${quote(message.created_at)}, ${quote(JSON.stringify(message))});`;
+    }).join("\n")}
+  `);
+  await post("/api/permissions", { owner_id: "mehmet", contact_user_id: "voice_johnny", contact_name: "Johnny", tier: "trusted" });
+  const spoken = "Vexo send my cat photos to Johnny";
+  const vexoPath = fileURLToPath(new URL("../vexo", import.meta.url));
+  const script = "import json,sys; sys.path.insert(0,sys.argv[1]); from fyde_bridge import dispatch_voice_to_fyde; print(json.dumps(dispatch_voice_to_fyde(sys.argv[2], 'mehmet', sys.argv[3])))";
+  const { stdout } = await promisify(execFile)("python3", ["-c", script, vexoPath, base, spoken], {
+    env: { ...process.env, FYDE_SESSION_TOKEN: "" },
+  });
+  const backgroundReply = JSON.parse(stdout);
+  assert.equal(type(backgroundReply), "send_completed", backgroundReply.text);
+  assert.equal(backgroundReply.action_card.recipient_name, "Johnny");
+  const restored = await (await fetch(`${base}/api/chat/mehmet`)).json();
+  assert.equal(restored.length, 80);
+  assert.equal(restored.at(-2).text, spoken);
+  assert.equal(restored.at(-2).source, "vexo");
+  assert.equal(restored.at(-1).id, backgroundReply.id);
+  assert.equal(restored.at(-1).source, "vexo");
+  const johnnyInbox = await (await fetch(`${base}/api/received/voice_johnny`)).json();
+  assert.ok(johnnyInbox.bundles.some((bundle) => bundle.id === backgroundReply.action_card.bundle.id));
+
+  const socket = new WebSocket(`${base.replace(/^http/, "ws")}/ws/mehmet?device_id=voice_history_test&platform=web&device_name=Test`);
+  const events = [];
+  socket.addEventListener("message", (event) => events.push(JSON.parse(event.data)));
+  await once(socket, "open");
+  try {
+    const liveReply = await chat("Vexo send my cat photos to Johnny");
+    // The POST awaits both notifications, but the client event queue may still be draining.
+    for (let i = 0; i < 50 && !events.some((event) => event.payload?.id === liveReply.id); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    const liveTurns = events.filter((event) => event.event === "chat_message");
+    assert.equal(liveTurns.length, 2, "Both the spoken request and receipt are broadcast");
+    assert.deepEqual(liveTurns.map((event) => event.payload.role), ["user", "assistant"]);
+    assert.ok(liveTurns.every((event) => event.payload.source === "vexo"));
+  } finally {
+    socket.close();
+  }
+  console.log("✓ Headless Vexo command: Johnny receives cat photos, newest history restores both turns, live clients receive both events");
   console.log("✓ Vexo voice sends: context, contacts, permissions, confirmation, privacy changes, expiry, and delivery");
 }

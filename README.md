@@ -81,3 +81,25 @@ npm run dev
 open apple/FydeApp/Fyde.xcodeproj
 ```
 Select an **iPhone Simulator**, physical **iPhone**, or **My Mac** target in Xcode and press **Run (`⌘R`)**.
+
+## Vexo commands while Fyde is closed
+
+The Mac listener sends wrist commands straight to the relay. Fyde does not need to be open. Double-tap Vexo #69, say “Vexo send my cat photos to Johnny,” and pause. The listener stops recording after the sentence, finds the files, and sends them under your existing contact permissions. An amber light means a single tap is needed to confirm. Private files still require confirmation in Fyde.
+
+The spoken command and the result are saved in your account's chat history, with file previews and the recipient on the send receipt. Apple and web clients receive new turns live and load missed turns when reopened.
+
+Keep `DEEPGRAM_API_KEY` and `FYDE_SESSION_TOKEN` in the untracked project `.env` file. Use the Fyde session for the account whose library you want to share. `FYDE_USER_ID` can optionally pin the account by ID or handle; the listener otherwise uses the authenticated account. `FYDE_RELAY_URL` defaults to `https://fyde.izbirakin.com`. The listener reads these values directly; it never puts API keys in its login-service configuration.
+
+```bash
+# Foreground listener, independent of the Fyde app
+python3 vexo/fyde_bridge.py watch
+
+# macOS: run the listener at login and restart it if it exits
+python3 vexo/fyde_bridge.py service start
+python3 vexo/fyde_bridge.py service status
+python3 vexo/fyde_bridge.py service stop
+```
+
+Add `--usb` to `watch` or `service start` to use a USB connection. Only one process can own the band connection, so disconnect it from the Fyde app or raw Mac Bridge before starting the listener. The Mac must remain awake, online, and within Bluetooth range (or connected over USB). The microphone stays blue while audio streams to Deepgram, with `mip_opt_out=true`; an active microphone notice also appears on the Mac.
+
+On iPhone, Fyde requests time to finish transcription and sending in the background, and restores its Bluetooth connection after a system relaunch. Keep the app signed in and connect the band once. iOS does not relaunch Bluetooth apps after the user force-quits them; use the Mac listener when Fyde is fully quit. Deepgram credentials on iPhone stay in memory, so a system relaunch may require entering them again.

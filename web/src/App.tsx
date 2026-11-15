@@ -288,41 +288,73 @@ export default function App() {
     void refreshAll(currentUserId);
 
     let ws: WebSocket | null = null;
-    try {
-      const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-      const wsUrl = API_BASE
-        ? `${API_BASE.replace(/^http/, "ws")}/ws/${currentUserId}?device_id=web_${currentUserId}&platform=web&device_name=Fyde+Web`
-        : `${proto}//${window.location.host}/ws/${currentUserId}?device_id=web_${currentUserId}&platform=web&device_name=Fyde+Web`;
+    let disposed = false;
+    let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+    const connect = () => {
+      try {
+        const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+        const wsUrl = API_BASE
+          ? `${API_BASE.replace(/^http/, "ws")}/ws/${currentUserId}?device_id=web_${currentUserId}&platform=web&device_name=Fyde+Web`
+          : `${proto}//${window.location.host}/ws/${currentUserId}?device_id=web_${currentUserId}&platform=web&device_name=Fyde+Web`;
 
-      ws = new WebSocket(wsUrl);
-      ws.onopen = () => setConnected(true);
-      ws.onclose = () => setConnected(false);
-      ws.onmessage = (evt) => {
-        try {
-          const msg = JSON.parse(evt.data);
-          if (
-            msg.event === "bundle_received" ||
-            msg.event === "bundle_accepted" ||
-            msg.event === "bundle_updated" ||
-            msg.event === "access_request_created" ||
-            msg.event === "access_request_resolved" ||
-            msg.event === "permission_updated" ||
-            msg.event === "friend_request_received" ||
-            msg.event === "friend_request_accepted" ||
-            msg.event === "social_feed_updated"
-          ) {
-            setToast(`Updated: ${msg.event.replaceAll("_", " ")}`);
-            void refreshAll(currentUserId);
+        ws = new WebSocket(wsUrl);
+        ws.onopen = () => {
+          setConnected(true);
+          void refreshAll(currentUserId);
+        };
+        ws.onclose = () => {
+          setConnected(false);
+          if (!disposed) reconnectTimer = setTimeout(connect, 2000);
+        };
+        ws.onmessage = (evt) => {
+          try {
+            const msg = JSON.parse(evt.data);
+            if (msg.event === "chat_message" || msg.event === "chat_message_updated") {
+              const message = msg.payload as ChatMessage;
+              if (message.user_id === currentUserId) {
+                setChatMessages((messages) => {
+                  const index = messages.findIndex((item) => item.id === message.id);
+                  const updated = [...messages];
+                  if (index >= 0) updated[index] = message;
+                  else updated.push(message);
+                  return updated.sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at));
+                });
+              }
+            }
+            if (
+              msg.event === "bundle_received" ||
+              msg.event === "bundle_accepted" ||
+              msg.event === "bundle_updated" ||
+              msg.event === "access_request_created" ||
+              msg.event === "access_request_resolved" ||
+              msg.event === "permission_updated" ||
+              msg.event === "friend_request_received" ||
+              msg.event === "friend_request_accepted" ||
+              msg.event === "social_feed_updated"
+            ) {
+              setToast(`Updated: ${msg.event.replaceAll("_", " ")}`);
+              void refreshAll(currentUserId);
+            }
+          } catch {
+            // ignore
           }
-        } catch {
-          // ignore
-        }
-      };
-    } catch {
-      // ignore offline WS
-    }
+        };
+      } catch {
+        // ignore offline WS
+      }
+    };
+    connect();
+    const syncOnReturn = () => {
+      if (document.visibilityState === "visible") void refreshAll(currentUserId);
+    };
+    window.addEventListener("focus", syncOnReturn);
+    document.addEventListener("visibilitychange", syncOnReturn);
     return () => {
+      disposed = true;
+      clearTimeout(reconnectTimer);
       ws?.close();
+      window.removeEventListener("focus", syncOnReturn);
+      document.removeEventListener("visibilitychange", syncOnReturn);
     };
   }, [currentUserId, refreshAll, showLanding]);
 
@@ -1084,6 +1116,9 @@ export default function App() {
 
               {chatMessages.map((msg) => (
                 <div key={msg.id} className={`msg-row ${msg.role === "user" ? "user" : "assistant"}`}>
+                  {msg.role === "user" && msg.source === "vexo" && (
+                    <div style={{ fontSize: "0.75rem", color: "var(--muted)" }}>Vexo #69</div>
+                  )}
                   <div className="msg-bubble">{msg.text}</div>
 
                   {msg.action_card && (

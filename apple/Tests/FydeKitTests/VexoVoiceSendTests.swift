@@ -3,6 +3,29 @@ import XCTest
 
 /// Voice sends ("Vexo, send my cat picture to John") that the relay holds for a confirmation tap.
 final class VexoVoiceSendTests: XCTestCase {
+    @MainActor
+    func testBackgroundTranscriptAndReceiptSyncWithoutDuplicates() {
+        let store = FydeStore(relayBaseURL: "http://127.0.0.1:9")
+        let optimistic = ChatMessage(id: "local_voice", userId: "mehmet", role: "user", text: "Vexo send my cat photos to Johnny", source: "vexo")
+        store.chatMessages = [optimistic]
+        let transcript = ChatMessage(id: "saved_voice", userId: "mehmet", role: "user", text: optimistic.text,
+                                     source: "vexo", clientMessageId: optimistic.id)
+        let receipt = ChatMessage(id: "sent_receipt", userId: "mehmet", role: "assistant", text: "Sent 2 photos to Johnny.", source: "vexo")
+        store.receiveChatMessage(transcript)
+        store.receiveChatMessage(transcript)
+        store.receiveChatMessage(receipt)
+        store.receiveChatMessage(receipt)
+        XCTAssertEqual(store.chatMessages.map(\.id), [transcript.id, receipt.id])
+        XCTAssertEqual(store.chatMessages.first?.source, "vexo")
+
+        var updated = receipt
+        updated.text = "Johnny saved the photos."
+        store.receiveChatMessage(updated)
+        XCTAssertEqual(store.chatMessages.last?.text, updated.text)
+        store.receiveChatMessage(ChatMessage(userId: "someone_else", role: "user", text: "Private transcript"))
+        XCTAssertEqual(store.chatMessages.count, 2)
+    }
+
     private func heldMessageJSON(id: String, createdAt: String, bandConfirmable: Bool) -> Data {
         // Shape returned by the edge relay's /api/chat for a held voice send.
         """
