@@ -521,15 +521,15 @@ async function executeSendBundle(
   }
 
   // Authorize the entire selection before creating a bundle or dispatching any delivery.
+  // Receiving a file lets you share that file, without exposing its owner's other files.
+  const available = new Map((await loadSendableAssets(env, params.senderId)).map((asset) => [asset.id, asset]));
   const assets: IndexedAsset[] = [];
   for (const aid of params.assetIds) {
-    const r = await env.DB.prepare("SELECT data FROM assets WHERE id = ? AND owner_id = ?")
-      .bind(aid, params.senderId)
-      .first<{ data: string }>();
-    if (!r?.data) {
-      throw new SendBundleError("One or more selected assets are unavailable or not owned by you.", 403);
+    const asset = available.get(aid);
+    if (!asset) {
+      throw new SendBundleError("One or more selected files are unavailable or not in your library.", 403);
     }
-    assets.push(JSON.parse(r.data) as IndexedAsset);
+    assets.push(asset);
   }
 
   const sender = await findUser(env, params.senderId);
@@ -823,6 +823,20 @@ async function loadOwnedAssets(env: Env, ownerId: string): Promise<IndexedAsset[
   return (results || []).map((r) => JSON.parse(String(r.data)) as IndexedAsset);
 }
 
+/** Files you uploaded or received directly, keeping the original asset ownership. */
+async function loadSendableAssets(env: Env, userId: string): Promise<IndexedAsset[]> {
+  const [owned, received] = await Promise.all([loadOwnedAssets(env, userId), loadReceivedAssets(env, userId)]);
+  const assets = new Map(owned.map((asset) => [asset.id, asset]));
+  const receivedAt = new Map<string, string>();
+  for (const item of received) {
+    if (assets.has(item.asset.id)) continue;
+    assets.set(item.asset.id, item.asset);
+    receivedAt.set(item.asset.id, item.receivedAt);
+  }
+  const when = (asset: IndexedAsset) => receivedAt.get(asset.id) || asset.created_at;
+  return [...assets.values()].sort((a, b) => when(b).localeCompare(when(a)));
+}
+
 /** Strong matches inside a search result list, so "send those to …" only takes the relevant ones. */
 function focusIdsForSearch(queryText: string, hits: SearchHit[]): string[] {
   if (hits.length === 0) return [];
@@ -889,8 +903,8 @@ async function handleChatSendCommand(
 
   // 2) What
   const spec = analyzeItemPhrase(itemPhrase);
-  const owned = await loadOwnedAssets(env, userId);
-  const ownedById = new Map(owned.map((a) => [a.id, a]));
+  const library = await loadSendableAssets(env, userId);
+  const libraryById = new Map(library.map((a) => [a.id, a]));
   let assets: IndexedAsset[] = [];
   let contextNote = "";
 
@@ -909,25 +923,25 @@ async function handleChatSendCommand(
         card: null,
       };
     }
-    assets = ids.map((id) => ownedById.get(id)).filter((a): a is IndexedAsset => !!a);
-    if (assets.length === 0) {
+    assets = ids.map((id) => libraryById.get(id)).filter((a): a is IndexedAsset => !!a);
+    if (assets.length !== ids.length) {
       const from = ctx.bundle && ctx.bundle.sender_id !== userId ? ctx.bundle.sender_name : "someone else";
       return {
-        replyText: `That came from ${from}'s library, so I can't forward it to ${recipient.name}. Ask ${from} to share it with them directly.`,
+        replyText: `Those files aren't in your library yet. Ask ${from} to send them to you first.`,
         card: null,
       };
     }
     if (ctx.action_type === "search_results") contextNote = " from your last search";
   } else if (spec.mode === "recent") {
-    const pool = spec.mediaTypes.length > 0 ? owned.filter((a) => spec.mediaTypes.includes(a.media_type)) : owned;
+    const pool = spec.mediaTypes.length > 0 ? library.filter((a) => spec.mediaTypes.includes(a.media_type)) : library;
     assets = pool.slice(0, spec.count === "many" ? 5 : 1);
     if (assets.length === 0) {
       return { replyText: `You don't have any ${spec.mediaTypes.join("/") || "files"} in your library yet.`, card: null };
     }
   } else {
     // Lexical signal = whole-word matches; semantic signal = the calibrated SearchHit.score from
-    // searchOwnerAssets (never raw cosine — unrelated photos can reach ~0.6 raw with EmbeddingGemma).
-    const hits = await searchOwnerAssets(env, userId, spec.query, null, 50);
+    // rankForQuery (never raw cosine — unrelated photos can reach ~0.6 raw with EmbeddingGemma).
+    const hits = await rankForQuery(env, library, spec.query, library.length);
     const searchScore = new Map(hits.map((h) => [h.asset.id, h.score]));
     const rank = (list: IndexedAsset[]) =>
       list.map((a) => ({
@@ -935,11 +949,11 @@ async function handleChatSendCommand(
         matched: countWordMatches(spec.contentTokens, assetWordSet(a)),
         vectorScore: searchScore.get(a.id) ?? 0,
       }));
-    const typed = spec.mediaTypes.length > 0 ? owned.filter((a) => spec.mediaTypes.includes(a.media_type)) : owned;
+    const typed = spec.mediaTypes.length > 0 ? library.filter((a) => spec.mediaTypes.includes(a.media_type)) : library;
     assets = pickConfidentMatches(rank(typed), spec.contentTokens, spec.count);
-    if (assets.length === 0 && typed.length !== owned.length) {
+    if (assets.length === 0 && typed.length !== library.length) {
       // "my surfing picture" when the surfing item is actually a video.
-      assets = pickConfidentMatches(rank(owned), spec.contentTokens, spec.count);
+      assets = pickConfidentMatches(rank(library), spec.contentTokens, spec.count);
     }
     if (assets.length === 0) {
       return {
@@ -1803,14 +1817,13 @@ export default {
       try {
         if (body.via === "band") {
           const perm = await findPermissionForRequester(env, userId, held.recipient_id || recipientName);
+          const available = new Map((await loadSendableAssets(env, userId)).map((asset) => [asset.id, asset]));
           for (const id of held.asset_ids || []) {
-            const row = await env.DB.prepare("SELECT data FROM assets WHERE id = ? AND owner_id = ?")
-              .bind(id, userId)
-              .first<{ data: string }>();
-            if (!row) {
-              throw new SendBundleError("One or more selected assets are unavailable or not owned by you.", 403);
+            const asset = available.get(id);
+            if (!asset) {
+              throw new SendBundleError("One or more selected files are unavailable or not in your library.", 403);
             }
-            if (evaluateAssetPermission(JSON.parse(row.data) as IndexedAsset, perm) === "deny") {
+            if (evaluateAssetPermission(asset, perm) === "deny") {
               throw new SendBundleError("This send includes private items. Confirm it in fyde instead.", 403);
             }
           }
@@ -2038,7 +2051,7 @@ export default {
       // D) Outbound sends are handled up front by handleChatSendCommand.
       // E) Multimodal Search in Chat
       else {
-        const hits = await searchOwnerAssets(env, userId, text, null, 6);
+        const hits = await searchLibrary(env, userId, text, null, 6, { own: true, received: true });
         if (hits.length === 0) {
           replyText = `No multimodal matches found for "${text}".`;
         } else {

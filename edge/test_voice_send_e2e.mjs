@@ -14,8 +14,8 @@ export async function runVoiceSendScenarios(base, executeSql) {
     });
     return { status: response.status, data: await response.json() };
   };
-  const chat = async (text, source = "vexo") => {
-    const result = await post("/api/chat", { user_id: "mehmet", text, source });
+  const chat = async (text, source = "vexo", userId = "mehmet") => {
+    const result = await post("/api/chat", { user_id: userId, text, source });
     assert.equal(result.status, 200);
     return result.data;
   };
@@ -197,6 +197,59 @@ export async function runVoiceSendScenarios(base, executeSql) {
   } finally {
     socket.close();
   }
+
+  // Received photos are part of the recipient's library, even before saving them
+  // to Apple Photos. Sending them must not grant access to the sender's other files.
+  const receiverId = "voice_received_owner";
+  const secondCat = { ...cat, id: "asset_voice_second_cat", filename: "milo_napping.jpg", title: "Milo Napping" };
+  await executeSql(`
+    INSERT INTO users (id, handle, display_name, email, created_at)
+    VALUES (${quote(receiverId)}, 'receivedowner', 'Received Owner', 'received@voice.test', ${quote(new Date().toISOString())});
+    INSERT INTO assets (id, owner_id, media_type, created_at, data)
+    VALUES (${quote(secondCat.id)}, 'mehmet', 'photo', ${quote(secondCat.created_at)}, ${quote(JSON.stringify(secondCat))});
+  `);
+  const catIds = [cat.id, secondCat.id].sort();
+  const received = await post("/api/send", {
+    sender_id: "mehmet", asset_ids: catIds, recipient_name: "Received Owner",
+    recipient_user_id: receiverId, channel: "fyde_direct",
+  });
+  assert.equal(received.status, 200);
+  const receivedSearch = await chat("Show me all of my cat photos", "typed", receiverId);
+  assert.equal(type(receivedSearch), "search_results", receivedSearch.text);
+  assert.deepEqual([...ids(receivedSearch)].sort(), catIds);
+  const forwarded = await chat("Send all of my cat photos to Maya", "typed", receiverId);
+  assert.equal(type(forwarded), "send_completed", forwarded.text);
+  assert.deepEqual([...ids(forwarded)].sort(), catIds);
+  assert.equal(forwarded.action_card.bundle.sender_id, receiverId);
+  const originalCats = await (await fetch(`${base}/api/assets/mehmet`)).json();
+  assert.ok(catIds.every((id) => originalCats.some((asset) => asset.id === id && asset.owner_id === "mehmet")),
+    "Forwarding preserves the original ownership");
+  const contextualForward = await chat("send those to Maya", "typed", receiverId);
+  assert.equal(type(contextualForward), "send_completed", contextualForward.text);
+  assert.deepEqual([...ids(contextualForward)].sort(), catIds);
+
+  for (const assetIds of [[bank.id], [cat.id, bank.id]]) {
+    const forbidden = await post("/api/send", {
+      sender_id: receiverId, asset_ids: assetIds, recipient_name: "Maya", recipient_user_id: "maya", channel: "fyde_direct",
+    });
+    assert.equal(forbidden.status, 403, "A received photo does not authorize the sender's unshared files");
+  }
+  const unshared = await chat("Send my bank statement to Maya", "typed", receiverId);
+  assert.equal(unshared.action_card, null);
+  const voiceForward = await chat("Vexo send both of my cat photos to Maya", "vexo", receiverId);
+  assert.equal(type(voiceForward), "send_confirmation", voiceForward.text);
+  assert.deepEqual([...ids(voiceForward)].sort(), catIds);
+  const confirmedForward = await confirm(voiceForward.id, { user_id: receiverId });
+  assert.equal(confirmedForward.status, 200);
+  assert.equal(type(confirmedForward.data), "send_completed");
+
+  const removedReceipt = await chat("Vexo send all of my cat photos to Maya", "vexo", receiverId);
+  assert.equal(type(removedReceipt), "send_confirmation", removedReceipt.text);
+  await executeSql(`DELETE FROM bundles WHERE id = ${quote(received.data.id)};`);
+  assert.equal((await confirm(removedReceipt.id, { user_id: receiverId })).status, 403,
+    "Confirmation must recheck that the sender still has the received files");
+  assert.equal((await confirm(removedReceipt.id, { user_id: receiverId, via: "app" })).status, 403);
+  console.log("✓ Received cat photos: search, all/both phrasing, contextual forwarding, confirmation, and unshared-file isolation");
   console.log("✓ Headless Vexo command: Johnny receives cat photos, newest history restores both turns, live clients receive both events");
   console.log("✓ Vexo voice sends: context, contacts, permissions, confirmation, privacy changes, expiry, and delivery");
 }
