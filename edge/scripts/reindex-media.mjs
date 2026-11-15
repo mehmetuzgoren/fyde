@@ -9,8 +9,7 @@
 //   node scripts/reindex-media.mjs --base https://fyde.izbirakin.com --user mehmet
 //   node scripts/reindex-media.mjs --base http://127.0.0.1:8792 --user mehmet --only asset_abc123
 //
-// Auth: pass a session token with --token (or FYDE_TOKEN); without one the relay must accept
-// `user_id` (REQUIRE_AUTH not "true").
+// Auth: set FYDE_TOKEN to the owner's session token. Reindexing requires an authenticated owner.
 
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
@@ -25,10 +24,12 @@ const args = Object.fromEntries(
 );
 const BASE = (args.base || "http://127.0.0.1:8787").replace(/\/$/, "");
 const USER = args.user || "mehmet";
-const TOKEN = args.token || process.env.FYDE_TOKEN || "";
+const TOKEN = process.env.FYDE_TOKEN || "";
 const ONLY = args.only ? new Set(args.only.split(",")) : null;
 const FRAME_EVERY_SEC = Number(args["frame-every"] || 3);
 const MAX_FRAMES = 24;
+
+if (!TOKEN) throw new Error("Set FYDE_TOKEN to the owner's session token before reindexing.");
 
 const headers = TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {};
 const work = fs.mkdtempSync(path.join(os.tmpdir(), "fyde-reindex-"));
@@ -103,6 +104,9 @@ async function reindex(asset) {
   const res = await fetch(`${BASE}/api/assets/${encodeURIComponent(asset.id)}/reindex`, { method: "POST", headers, body: form });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(`${res.status} ${body.error || ""}`.trim());
+  if (body.embedder_name !== "embeddinggemma-2-768" || body.dims !== 768) {
+    throw new Error("The server did not produce an EmbeddingGemma 2 index.");
+  }
   return { detail, body };
 }
 

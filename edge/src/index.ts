@@ -487,7 +487,7 @@ async function rankForQuery(env: Env, assets: IndexedAsset[], query: string, lim
   const needsLegacy = assets.some((a) => !isEg2Asset(a));
   const [eg2, legacy] = await Promise.all([
     needsEg2 ? embedQueryEg2(env, qClean) : Promise.resolve(null),
-    needsLegacy ? embedQueryEdge(qClean, env) : Promise.resolve(null),
+    Promise.resolve(needsLegacy ? embedTextLocal(qClean) : null),
   ]);
   return rankAssets(assets, qClean, { eg2, legacy }, limit);
 }
@@ -1062,7 +1062,7 @@ export default {
           status: "ok",
           architecture: "cloudflare-workers-do-d1-r2",
           domain: "fyde.izbirakin.com",
-          embedder: env.AI ? EG2_EMBEDDER : env.EMBEDDING_GEMMA_URL ? "embeddinggemma-2-mrl256" : "fyde-edge-mrl256",
+          embedder: env.AI ? EG2_EMBEDDER : "fyde-edge-mrl256",
         })
       );
     }
@@ -1314,17 +1314,13 @@ export default {
     if (reindexMatch && request.method === "POST") {
       const isMultipart = (request.headers.get("Content-Type") || "").includes("multipart/form-data");
       const form = isMultipart ? await request.formData() : null;
-      const actor = await resolveActorUserId(
-        request,
-        env,
-        String(form?.get("user_id") || url.searchParams.get("user_id") || "")
-      );
-      if ("error" in actor) return withCors(actor.error, request);
+      const user = await getAuthenticatedUser(request, env);
+      if (!user) return withCors(Response.json({ error: "Sign in to reindex files." }, { status: 401 }), request);
       const assetId = decodeURIComponent(reindexMatch[1]);
       const row = await env.DB.prepare("SELECT data FROM assets WHERE id = ?").bind(assetId).first<{ data: string }>();
       if (!row?.data) return withCors(Response.json({ error: "Asset not found" }, { status: 404 }), request);
       const asset = JSON.parse(row.data) as IndexedAsset;
-      if (asset.owner_id !== actor.userId) {
+      if (asset.owner_id !== user.id) {
         return withCors(Response.json({ error: "Only the owner can re-index this asset." }, { status: 403 }), request);
       }
       const loadOriginal = async () => {
@@ -1335,7 +1331,11 @@ export default {
       const original = asset.media_type === "photo" && env.GEMINI_API_KEY ? await loadOriginal() : null;
       const description = original ? await summarizeImage(env, original, form?.get("preview")) : null;
       if (description) Object.assign(asset, description);
-      Object.assign(asset, await computeAssetVectors(env, asset, original ? async () => original : loadOriginal, await readMediaParts(form)));
+      const vectors = await computeAssetVectors(env, asset, original ? async () => original : loadOriginal, await readMediaParts(form));
+      if (vectors.embedder_name !== EG2_EMBEDDER) {
+        return withCors(Response.json({ error: "Visual indexing is unavailable. The existing index was kept." }, { status: 503 }), request);
+      }
+      Object.assign(asset, vectors);
       await env.DB.prepare("UPDATE assets SET data = ? WHERE id = ?").bind(JSON.stringify(asset), asset.id).run();
       await notifyUserHub(env, asset.owner_id, "asset_indexed", asset);
       return withCors(

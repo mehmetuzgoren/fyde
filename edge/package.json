@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "test": "node test_edge_e2e.mjs",
     "test:voice": "node test_voice_commands.mjs",
-    "deploy": "cd ../web && npm run build && cd ../edge && CI=1 wrangler deploy"
+    "deploy": "cd ../web && npm run build && cd ../edge && CI=1 wrangler deploy",
+    "test:embeddings": "node test_embeddings_e2e.mjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260310.0",

@@ -138,10 +138,13 @@ async function runEg2(env: Env, inputs: Record<string, unknown>): Promise<number
     };
     const rows = out?.data;
     if (!rows || rows.length === 0) return null;
-    return rows
+    const vectors = rows
       .slice()
       .sort((a, b) => (a.index ?? 0) - (b.index ?? 0))
-      .map((r) => normalize(typeof r.embedding === "string" ? decodeFloat32Base64(r.embedding) : r.embedding));
+      .map((r) => typeof r.embedding === "string" ? Array.from(decodeFloat32Base64(r.embedding)) : r.embedding);
+    if (vectors.some((v) => !Array.isArray(v) || v.length !== EG2_DIM ||
+      !v.every(Number.isFinite) || !v.some((x) => Math.abs(x) > 1e-9))) return null;
+    return vectors.map(normalize);
   } catch (err) {
     console.warn(`[mediaIndex] ${EG2_MODEL} failed: ${String((err as Error)?.message || err).slice(0, 240)}`);
     return null;
@@ -243,7 +246,7 @@ function isFile(v: unknown): v is File {
 export async function readMediaParts(form: FormData | null): Promise<MediaParts> {
   if (!form) return { preview: null, frames: [], duration: null };
   const rawPreview: unknown = form.get("preview");
-  const previewFile = isFile(rawPreview) && rawPreview.size > 0 ? rawPreview : null;
+  const previewFile = isFile(rawPreview) && rawPreview.size > 0 && rawPreview.size <= MAX_INLINE_IMAGE_BYTES ? rawPreview : null;
   const preview = previewFile ? { bytes: await previewFile.arrayBuffer(), mime: previewFile.type || "image/jpeg" } : null;
 
   const times = String(form.get("frame_times") || "")
@@ -254,7 +257,7 @@ export async function readMediaParts(form: FormData | null): Promise<MediaParts>
   const frameFields = (form.getAll("frame") as unknown[]).filter(isFile);
   for (let i = 0; i < frameFields.length && frames.length < MAX_FRAMES * 4; i++) {
     const f = frameFields[i];
-    if (f.size === 0) continue;
+    if (f.size === 0 || f.size > MAX_INLINE_IMAGE_BYTES) continue;
     frames.push({
       bytes: await f.arrayBuffer(),
       mime: f.type || "image/jpeg",
@@ -275,7 +278,7 @@ export async function readMediaParts(form: FormData | null): Promise<MediaParts>
 function legacyVectors(asset: IndexedAsset): VectorFields {
   return {
     embedding: embedTextLocal(
-      `${asset.title} ${asset.filename} ${asset.location} ${asset.people.join(" ")} ${asset.tags.join(" ")} ${asset.summary}`
+      `${asset.title} ${asset.filename} ${asset.location} ${asset.people.join(" ")} ${asset.tags.join(" ")} ${asset.summary} ${asset.ocr_text}`
     ),
     embedder_name: LEGACY_EMBEDDER,
     video_moments: asset.video_moments || [],
@@ -335,9 +338,8 @@ export async function computeAssetVectors(
       });
     });
 
-    // Clip-level vector: the model's native video understanding when the file is small enough to
-    // send (measured better than keyframes alone: 0.70 vs 0.66 for "mountain lake"), else the
-    // keyframes as one multi-image input, else the mean of the moments.
+    // Prefer the native video input for small files, then combined keyframes,
+    // then the mean of the searchable frame vectors.
     let clip: number[] | null = null;
     const original = await loadOriginal();
     if (original && original.bytes.byteLength <= MAX_INLINE_VIDEO_BYTES) clip = await embedVideoEg2(env, original);
@@ -359,10 +361,7 @@ export async function computeAssetVectors(
 // Ranking
 // ---------------------------------------------------------------------------
 
-/**
- * Calibration measured on real library photos/videos (2026-11-14): text→image cosines are
- * ~0.64–0.72 for true matches and ~0.49–0.63 otherwise; text→text sits ~0.1 higher.
- */
+/** Use separate relevance gates for text-to-image and text-to-text retrieval. */
 const CALIBRATION = {
   visual: { floor: 0.52, span: 0.2, gate: 0.6 },
   text: { floor: 0.62, span: 0.2, gate: 0.68 },
@@ -528,7 +527,7 @@ export function rankAssets(assets: IndexedAsset[], query: string, q: QueryVector
     const matched = terms.filter((t) => hay.includes(t));
     const score = Math.max(baseSim, bestMomentSim) + Math.min(0.45, matched.length * 0.18);
     if (score < 0.16 && matched.length === 0) continue;
-    const reasons = [matched.length > 0 ? `Matched ${matched.slice(0, 3).join(", ")}` : "Multimodal vector similarity"];
+    const reasons = [matched.length > 0 ? `Matched ${matched.slice(0, 3).join(", ")}` : "Text similarity"];
     if (bestMomentSec !== null && bestMomentSim >= 0.18) {
       reasons.push(`Video moment @ ${bestMomentSec.toFixed(1)}s`);
     } else {
