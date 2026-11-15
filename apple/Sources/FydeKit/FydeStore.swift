@@ -84,6 +84,8 @@ public final class FydeStore {
     public var searchHits: [SearchHit] = []
     public var myAssets: [IndexedAsset] = []
     public var isSearching: Bool = false
+    private var searchVersion: Int = 0
+    private var assetVersion: Int = 0
 
     // Middle Tab: Chat & Permissions state
     public var chatMessages: [ChatMessage] = []
@@ -473,18 +475,23 @@ public final class FydeStore {
     }
 
     public func loadMyAssets() async {
+        let version = assetVersion
         guard let url = URL(string: "\(relayBaseURL)/api/assets/\(currentUserId)") else { return }
         do {
             let (data, _) = try await relayClient.data(from: url)
-            myAssets = try FydeJSON.makeDecoder().decode([IndexedAsset].self, from: data)
+            let assets = try FydeJSON.makeDecoder().decode([IndexedAsset].self, from: data)
+            guard version == assetVersion else { return }
+            myAssets = assets
         } catch {
             // Keep existing cached local assets
         }
     }
 
     public func performSearch() async {
+        searchVersion += 1
+        let version = searchVersion
         isSearching = true
-        defer { isSearching = false }
+        defer { if version == searchVersion { isSearching = false } }
 
         if isRelayConnected, let url = URL(string: "\(relayBaseURL)/api/search") {
             var req = authorizedRequest(url: url, method: "POST")
@@ -502,11 +509,13 @@ public final class FydeStore {
             if let (data, resp) = try? await relayClient.data(for: req),
                (resp as? HTTPURLResponse)?.statusCode == 200,
                let decoded = try? FydeJSON.makeDecoder().decode([SearchHit].self, from: data) {
+                guard version == searchVersion else { return }
                 searchHits = decoded
                 return
             }
         }
 
+        guard version == searchVersion else { return }
         // Offline local Apple Neural Engine fallback search
         let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         var pool = searchScope == "contacts" ? [] : myAssets.filter {
@@ -567,6 +576,34 @@ public final class FydeStore {
             guard total > 0.14 else { return nil }
             return SearchHit(asset: asset, score: min(0.99, total), matchReason: receivedReason(asset, fallback: "On-device Apple Neural Engine match"))
         }.sorted { $0.score > $1.score }
+    }
+
+    public func deleteAsset(_ asset: IndexedAsset) async throws {
+        guard asset.ownerId == currentUserId else {
+            throw NSError(domain: "Fyde", code: 403, userInfo: [NSLocalizedDescriptionKey: "Only the owner can delete this file."])
+        }
+        guard var components = URLComponents(string: "\(relayBaseURL)/api/assets/") else { throw URLError(.badURL) }
+        components.path += asset.id
+        components.queryItems = [URLQueryItem(name: "user_id", value: currentUserId)]
+        guard let url = components.url else { throw URLError(.badURL) }
+        let (data, response) = try await relayClient.data(for: authorizedRequest(url: url, method: "DELETE"))
+        guard let response = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+        guard (200..<300).contains(response.statusCode) else {
+            let body = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            let message = body?["error"] as? String ?? body?["detail"] as? String
+                ?? "Could not delete this file. Please try again."
+            throw NSError(domain: "Fyde", code: response.statusCode, userInfo: [NSLocalizedDescriptionKey: message])
+        }
+        removeDeletedAsset(asset.id)
+        statusBanner = "Deleted “\(asset.title)” from your library."
+    }
+
+    private func removeDeletedAsset(_ id: String) {
+        assetVersion += 1
+        searchVersion += 1
+        isSearching = false
+        myAssets.removeAll { $0.id == id }
+        searchHits.removeAll { $0.asset.id == id }
     }
 
     public func loadChatHistory() async {
@@ -1111,6 +1148,10 @@ public final class FydeStore {
         case "connected":
             isRelayConnected = true
             await loadChatHistory()
+        case "asset_deleted":
+            if let dict = payload as? [String: Any], let id = dict["id"] as? String {
+                removeDeletedAsset(id)
+            }
         case "bundle_received":
             vexo.notifyFydeEventLED(kind: .incomingBundleOrRequest)
             await loadReceivedInbox()

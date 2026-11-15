@@ -307,6 +307,29 @@ class FydeStorage:
                 ).fetchall()
         return [IndexedAsset.model_validate_json(r["data"]) for r in rows]
 
+    def delete_asset(self, asset: IndexedAsset) -> None:
+        with self._conn() as conn:
+            if asset.blob_id:
+                blob_url = f"/api/blobs/{asset.blob_id}"
+                referenced = conn.execute(
+                    """
+                    SELECT 1 FROM assets WHERE id != ? AND (
+                        json_extract(data, '$.blob_id') = ? OR
+                        json_extract(data, '$.download_url') = ? OR json_extract(data, '$.thumbnail_url') = ?
+                    )
+                    UNION ALL
+                    SELECT 1 FROM bundles, json_each(bundles.data, '$.items') AS item WHERE
+                        json_extract(item.value, '$.download_url') = ? OR json_extract(item.value, '$.thumbnail_url') = ?
+                    LIMIT 1
+                    """,
+                    (asset.id, asset.blob_id, blob_url, blob_url, blob_url, blob_url),
+                ).fetchone()
+                if not referenced:
+                    path = self.get_blob_path(asset.blob_id)
+                    if path:
+                        path.unlink()
+            conn.execute("DELETE FROM assets WHERE id = ? AND owner_id = ?", (asset.id, asset.owner_id))
+
     def search_owner_assets(
         self,
         owner_id: str,

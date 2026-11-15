@@ -791,6 +791,60 @@ a {
   max-width: 860px;
 }
 
+.delete-file-dialog {
+  width: min(430px, calc(100% - 32px));
+  max-height: calc(100dvh - 32px);
+  color: var(--ink);
+}
+
+.delete-file-dialog::backdrop {
+  background: rgba(10, 10, 10, 0.6);
+}
+
+.delete-file-dialog h2 {
+  margin: 0;
+  font-size: 1.25rem;
+}
+
+.delete-file-dialog p {
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.delete-file-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.delete-file-actions .btn,
+.pill.delete-file-action {
+  min-height: 44px;
+}
+
+.pill.delete-file-action,
+.delete-file-error {
+  color: #a32922;
+}
+
+.btn-danger {
+  background: #a32922;
+  border-color: #a32922;
+  color: var(--white);
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: #85211c;
+}
+
+.delete-file-dialog button:focus-visible,
+.delete-file-action:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 3px;
+}
+
 /* Sign in / Sign up card */
 .auth-card {
   max-width: 400px;

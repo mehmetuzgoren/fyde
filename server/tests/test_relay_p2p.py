@@ -7,6 +7,58 @@ from app.main import create_app
 from app.models import ChatMessage
 
 
+def test_delete_files_checks_owner_and_preserves_shared_copies(tmp_path: Path) -> None:
+    app = create_app(data_dir=tmp_path / "delete_files")
+    with TestClient(app) as client:
+        def upload(name: str) -> dict:
+            response = client.post(
+                "/api/assets/upload",
+                data={"owner_id": "mehmet", "title": name},
+                files={"file": (f"{name}.txt", b"File deletion integration fixture", "text/plain")},
+            )
+            assert response.status_code == 200
+            return response.json()
+
+        asset = upload("Unshared file")
+        endpoint = f"/api/assets/{asset['id']}"
+        assert client.delete(endpoint).status_code == 422
+        assert client.delete(endpoint, params={"user_id": "maya"}).status_code == 403
+        assert client.get(asset["download_url"]).status_code == 200
+        with client.websocket_connect("/ws/mehmet?device_id=delete_test&platform=web") as ws:
+            assert ws.receive_json()["event"] == "connected"
+            deleted = client.delete(endpoint, params={"user_id": "mehmet"})
+            assert deleted.status_code == 200
+            assert deleted.json() == {"ok": True, "id": asset["id"]}
+            assert ws.receive_json() == {"event": "asset_deleted", "payload": {"id": asset["id"]}}
+        assert client.delete(endpoint, params={"user_id": "mehmet"}).status_code == 404
+        assert client.get(asset["download_url"]).status_code == 404
+        assert all(a["id"] != asset["id"] for a in client.get("/api/assets/mehmet").json())
+        hits = client.post("/api/search", json={"user_id": "mehmet", "query": "", "scope": "mine", "limit": 100}).json()
+        assert all(hit["asset"]["id"] != asset["id"] for hit in hits)
+
+        shared = upload("Shared file")
+        sent = client.post("/api/send", json={
+            "sender_id": "mehmet", "asset_ids": [shared["id"]],
+            "recipient_name": "Sarah", "recipient_user_id": "sarah", "channel": "fyde_direct",
+        })
+        assert sent.status_code == 200
+        bundle = sent.json()
+        accepted = client.post(f"/api/bundles/{bundle['id']}/accept", json={
+            "user_id": "sarah", "destination_type": "files", "album_or_folder": "Saved files",
+        })
+        assert accepted.status_code == 200
+        assert client.delete(f"/api/assets/{shared['id']}", params={"user_id": "mehmet"}).status_code == 200
+        assert client.get(shared["download_url"]).content == b"File deletion integration fixture"
+        copies = client.get("/api/assets/sarah").json()
+        copy = next(a for a in copies if a["download_url"] == shared["download_url"])
+        assert copy["id"] != shared["id"]
+        assert client.delete(f"/api/assets/{copy['id']}", params={"user_id": "sarah"}).status_code == 200
+        # The received bundle remains usable after both searchable library entries are removed.
+        assert client.get(bundle["items"][0]["download_url"]).status_code == 200
+        received = client.post("/api/search", json={"user_id": "sarah", "query": "", "scope": "contacts"}).json()
+        assert any(hit["asset"]["id"] == shared["id"] for hit in received)
+
+
 def test_wrist_commands_persist_and_broadcast_both_chat_turns(tmp_path: Path) -> None:
     app = create_app(data_dir=tmp_path / "wrist_history")
     with TestClient(app) as client:
