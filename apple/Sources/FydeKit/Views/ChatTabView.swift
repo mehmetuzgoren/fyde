@@ -99,6 +99,7 @@ public struct ChatTabView: View {
                         }
                         .padding(14)
                     }
+                    .refreshable { await store.refreshAll() }
                     .onChange(of: store.chatMessages.count) { _, _ in
                         if let lastId = store.chatMessages.last?.id {
                             withAnimation {

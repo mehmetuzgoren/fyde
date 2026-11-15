@@ -4,7 +4,7 @@ import Observation
 @MainActor
 @Observable
 public final class FydeStore {
-    public var relayBaseURL: String = "http://127.0.0.1:8787" {
+    public var relayBaseURL: String = "https://fyde.izbirakin.com" {
         didSet {
             UserDefaults.standard.set(relayBaseURL, forKey: "fyde.relayBaseURL")
         }
@@ -102,8 +102,10 @@ public final class FydeStore {
     private let deviceId: String = "apple_\(PlatformMediaBridge.currentPlatform)_\(UUID().uuidString.prefix(6))"
     private var webSocketTask: URLSessionWebSocketTask?
     private var wsListenerTask: Task<Void, Never>?
+    private let relayClient: FydeRelayClient
 
-    public init(relayBaseURL: String? = nil) {
+    public init(relayBaseURL: String? = nil, relaySession: URLSession? = nil) {
+        self.relayClient = FydeRelayClient(session: relaySession)
         if let custom = relayBaseURL, !custom.isEmpty {
             self.relayBaseURL = custom
         } else if let envURL = ProcessInfo.processInfo.environment["FYDE_RELAY_URL"], !envURL.isEmpty {
@@ -167,7 +169,7 @@ public final class FydeStore {
             let authenticated: Bool
             let user: UserProfile?
         }
-        if let (data, resp) = try? await URLSession.shared.data(for: req),
+        if let (data, resp) = try? await relayClient.data(for: req),
            (resp as? HTTPURLResponse)?.statusCode == 200,
            let decoded = try? FydeJSON.makeDecoder().decode(MeResponse.self, from: data) {
             if decoded.authenticated, let u = decoded.user {
@@ -199,7 +201,7 @@ public final class FydeStore {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["email": email])
         do {
-            let (data, resp) = try await URLSession.shared.data(for: req)
+            let (data, resp) = try await relayClient.data(for: req)
             let obj = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
             if (resp as? HTTPURLResponse)?.statusCode == 200 {
                 return (true, obj["dev_code_hint"] as? String, nil)
@@ -279,7 +281,7 @@ public final class FydeStore {
             let token: String?
         }
         do {
-            let (data, resp) = try await URLSession.shared.data(for: req)
+            let (data, resp) = try await relayClient.data(for: req)
             if (resp as? HTTPURLResponse)?.statusCode == 200,
                let decoded = try? FydeJSON.makeDecoder().decode(AuthPayload.self, from: data) {
                 applyAuthenticatedSession(user: decoded.user, token: decoded.token)
@@ -305,7 +307,7 @@ public final class FydeStore {
             "platform_interest": platform
         ])
         do {
-            let (data, _) = try await URLSession.shared.data(for: req)
+            let (data, _) = try await relayClient.data(for: req)
             let obj = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
             return (obj["message"] as? String) ?? (obj["error"] as? String) ?? "Joined fyde. waitlist!"
         } catch {
@@ -318,7 +320,7 @@ public final class FydeStore {
         struct PlansResp: Decodable {
             let plans: [PlanDefinition]
         }
-        if let (data, resp) = try? await URLSession.shared.data(from: url),
+        if let (data, resp) = try? await relayClient.data(from: url),
            (resp as? HTTPURLResponse)?.statusCode == 200,
            let decoded = try? FydeJSON.makeDecoder().decode(PlansResp.self, from: data),
            !decoded.plans.isEmpty {
@@ -334,7 +336,7 @@ public final class FydeStore {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["tier": tier.rawValue, "interval": interval])
         do {
-            let (data, resp) = try await URLSession.shared.data(for: req)
+            let (data, resp) = try await relayClient.data(for: req)
             let obj = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
             if (resp as? HTTPURLResponse)?.statusCode == 200 {
                 if let urlStr = obj["checkout_url"] as? String, let checkoutURL = URL(string: urlStr) {
@@ -356,7 +358,7 @@ public final class FydeStore {
     public func signOut() async {
         if let url = URL(string: "\(relayBaseURL)/api/auth/logout") {
             let req = authorizedRequest(url: url, method: "POST")
-            _ = try? await URLSession.shared.data(for: req)
+            _ = try? await relayClient.data(for: req)
         }
         disconnectWebSocket()
         sessionToken = nil
@@ -383,31 +385,38 @@ public final class FydeStore {
     private func checkHealthAndUsers() async {
         guard let healthURL = URL(string: "\(relayBaseURL)/api/health") else { return }
         do {
-            let (data, resp) = try await URLSession.shared.data(from: healthURL)
-            if let http = resp as? HTTPURLResponse, http.statusCode == 200 {
-                isRelayConnected = true
-                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let serverEmbedder = json["embedder"] as? String {
-                    activeEmbedderName = "\(onDeviceEmbedder.activeModelLabel) + P2P (\(serverEmbedder))"
-                }
+            let (data, response) = try await relayClient.data(from: healthURL)
+            guard (response as? HTTPURLResponse)?.statusCode == 200,
+                  let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  json["status"] as? String == "ok" else {
+                isRelayConnected = false
+                activeEmbedderName = onDeviceEmbedder.activeModelLabel + " (Offline Local Mode)"
+                return
             }
-            if let usersURL = URL(string: "\(relayBaseURL)/api/users") {
-                let (uData, _) = try await URLSession.shared.data(from: usersURL)
-                let decoded = try FydeJSON.makeDecoder().decode([UserProfile].self, from: uData)
-                if !decoded.isEmpty {
-                    self.users = decoded
-                }
+            isRelayConnected = true
+            if let serverEmbedder = json["embedder"] as? String {
+                activeEmbedderName = "\(onDeviceEmbedder.activeModelLabel) + P2P (\(serverEmbedder))"
             }
         } catch {
             isRelayConnected = false
             activeEmbedderName = onDeviceEmbedder.activeModelLabel + " (Offline Local Mode)"
+            return
+        }
+
+        // A directory/auth/schema error does not mean the relay is offline.
+        if let usersURL = URL(string: "\(relayBaseURL)/api/users"),
+           let (data, response) = try? await relayClient.data(from: usersURL),
+           (response as? HTTPURLResponse)?.statusCode == 200,
+           let decoded = try? FydeJSON.makeDecoder().decode([UserProfile].self, from: data),
+           !decoded.isEmpty {
+            users = decoded
         }
     }
 
     public func loadMyAssets() async {
         guard let url = URL(string: "\(relayBaseURL)/api/assets/\(currentUserId)") else { return }
         do {
-            let (data, _) = try await URLSession.shared.data(from: url)
+            let (data, _) = try await relayClient.data(from: url)
             myAssets = try FydeJSON.makeDecoder().decode([IndexedAsset].self, from: data)
         } catch {
             // Keep existing cached local assets
@@ -432,7 +441,7 @@ public final class FydeStore {
                 payload["media_type"] = filter.rawValue
             }
             req.httpBody = try? JSONSerialization.data(withJSONObject: payload)
-            if let (data, resp) = try? await URLSession.shared.data(for: req),
+            if let (data, resp) = try? await relayClient.data(for: req),
                (resp as? HTTPURLResponse)?.statusCode == 200,
                let decoded = try? FydeJSON.makeDecoder().decode([SearchHit].self, from: data) {
                 searchHits = decoded
@@ -462,7 +471,7 @@ public final class FydeStore {
 
     public func loadChatHistory() async {
         guard let url = URL(string: "\(relayBaseURL)/api/chat/\(currentUserId)") else { return }
-        if let (data, _) = try? await URLSession.shared.data(from: url),
+        if let (data, _) = try? await relayClient.data(from: url),
            let decoded = try? FydeJSON.makeDecoder().decode([ChatMessage].self, from: data) {
             chatMessages = decoded
         }
@@ -490,12 +499,8 @@ public final class FydeStore {
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)
 
         do {
-            let (data, resp) = try await URLSession.shared.data(for: req)
-            guard (resp as? HTTPURLResponse)?.statusCode == 200 else {
-                chatMessages.append(ChatMessage(userId: currentUserId, role: "assistant", text: "Relay returned an error while processing your request."))
-                return
-            }
-            let reply = try FydeJSON.makeDecoder().decode(ChatMessage.self, from: data)
+            let reply = try await relayClient.chatReply(for: req)
+            isRelayConnected = true
             if !chatMessages.contains(where: { $0.id == reply.id }) {
                 chatMessages.append(reply)
             }
@@ -504,11 +509,17 @@ public final class FydeStore {
             await loadMyAssets()
             await performSearch()
         } catch {
+            if error is FydeRelayClient.ReplyError {
+                isRelayConnected = true
+            } else if let connectionError = error as? URLError,
+                      connectionError.code == .notConnectedToInternet || FydeRelayClient.failedBeforeConnecting(connectionError) {
+                isRelayConnected = false
+            }
             chatMessages.append(
                 ChatMessage(
                     userId: currentUserId,
                     role: "assistant",
-                    text: "Offline from Fyde Relay (\(relayBaseURL)). Start the relay server or configure your Cloud Run URL in Settings."
+                    text: FydeRelayClient.failureMessage(for: error)
                 )
             )
         }
@@ -533,7 +544,7 @@ public final class FydeStore {
             "sender_platform": PlatformMediaBridge.currentPlatform
         ]
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)
-        if let (data, resp) = try? await URLSession.shared.data(for: req),
+        if let (data, resp) = try? await relayClient.data(for: req),
            (resp as? HTTPURLResponse)?.statusCode == 200,
            let bundle = try? FydeJSON.makeDecoder().decode(TransferBundle.self, from: data) {
             statusBanner = "Sent '\(bundle.title)' to \(bundle.recipientName) via \(channel.label)"
@@ -543,7 +554,7 @@ public final class FydeStore {
 
     public func loadPermissions() async {
         guard let url = URL(string: "\(relayBaseURL)/api/permissions/\(currentUserId)") else { return }
-        if let (data, _) = try? await URLSession.shared.data(from: url),
+        if let (data, _) = try? await relayClient.data(from: url),
            let decoded = try? FydeJSON.makeDecoder().decode([ContactPermission].self, from: data) {
             permissions = decoded
         }
@@ -581,7 +592,7 @@ public final class FydeStore {
             smartScopes: smartScopes
         )
         req.httpBody = try? FydeJSON.makeEncoder().encode(payload)
-        if let (_, resp) = try? await URLSession.shared.data(for: req),
+        if let (_, resp) = try? await relayClient.data(for: req),
            (resp as? HTTPURLResponse)?.statusCode == 200 {
             await loadPermissions()
             statusBanner = "Updated permissions for \(contactName)"
@@ -595,7 +606,7 @@ public final class FydeStore {
             let sentBundles: [TransferBundle]
             let incomingRequests: [AccessRequest]
         }
-        if let (data, _) = try? await URLSession.shared.data(from: url),
+        if let (data, _) = try? await relayClient.data(from: url),
            let decoded = try? FydeJSON.makeDecoder().decode(InboxResponse.self, from: data) {
             receivedBundles = decoded.bundles
             sentBundles = decoded.sentBundles
@@ -613,7 +624,7 @@ public final class FydeStore {
             "decision": approve ? "approve" : "deny"
         ]
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)
-        if let (_, resp) = try? await URLSession.shared.data(for: req),
+        if let (_, resp) = try? await relayClient.data(for: req),
            (resp as? HTTPURLResponse)?.statusCode == 200 {
             statusBanner = approve
                 ? "Approved & sent files to \(request.requesterName)"
@@ -666,7 +677,7 @@ public final class FydeStore {
                     "album_or_folder": targetAlbum
                 ]
                 req.httpBody = try? JSONSerialization.data(withJSONObject: payload)
-                _ = try? await URLSession.shared.data(for: req)
+                _ = try? await relayClient.data(for: req)
             }
             await loadReceivedInbox()
             await loadMyAssets()
