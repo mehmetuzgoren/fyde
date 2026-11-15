@@ -3,6 +3,7 @@ export interface Env {
   BLOBS: R2Bucket;
   USER_HUB: DurableObjectNamespace;
   ASSETS: Fetcher;
+  AI?: Ai;
 
   PUBLIC_APP_URL?: string;
   EMAIL_FROM?: string;

@@ -2,7 +2,8 @@ import { getAuthenticatedUser, handleWaitlistAndAuthRoutes, rowToUserProfile } f
 import { handleBillingRoutes } from "./billing";
 import { randomId } from "./crypto";
 import { UserRelayHub } from "./durableHub";
-import { cosineSimilarity, embedQueryEdge, embedTextLocal, evaluateAssetPermission } from "./embedder";
+import { embedQueryEdge, embedTextLocal, evaluateAssetPermission } from "./embedder";
+import { computeAssetVectors, EG2_EMBEDDER, embedQueryEg2, isEg2Asset, rankAssets, readMediaParts } from "./mediaIndex";
 import { ensureSeeded } from "./seed";
 import type {
   AccessRequest,
@@ -135,67 +136,11 @@ async function searchOwnerAssets(
     return assets.slice(0, limit).map((asset) => ({ asset, score: 1.0, match_reason: "Recent item" }));
   }
 
-  const qVec = await embedQueryEdge(qClean, env);
-  const stopWords = new Set([
-    "the", "and", "for", "with", "from", "all", "my", "our", "your", "files", "file",
-    "photos", "photo", "videos", "video", "documents", "send", "get", "find", "in", "of", "to", "a",
+  const [eg2, legacy] = await Promise.all([
+    assets.some(isEg2Asset) ? embedQueryEg2(env, qClean) : Promise.resolve(null),
+    Promise.resolve(assets.some((a) => !isEg2Asset(a)) ? embedTextLocal(qClean) : null),
   ]);
-  const qTokens = qClean
-    .toLowerCase()
-    .replace(/,/g, " ")
-    .split(/\s+/)
-    .filter((w) => w.length > 1 && !stopWords.has(w));
-
-  const hits: SearchHit[] = [];
-  for (const asset of assets) {
-    const baseSim = cosineSimilarity(qVec, asset.embedding);
-    let bestMomentSec: number | null = null;
-    let bestMomentLabel: string | null = null;
-    let bestMomentSim = -1;
-
-    for (const m of asset.video_moments || []) {
-      let mSim = cosineSimilarity(qVec, m.embedding);
-      if (qTokens.some((tok) => m.label.toLowerCase().includes(tok))) mSim += 0.22;
-      if (mSim > bestMomentSim) {
-        bestMomentSim = mSim;
-        bestMomentSec = m.timestamp_sec;
-        bestMomentLabel = m.label;
-      }
-    }
-
-    const haystack = `${asset.title} ${asset.filename} ${asset.location} ${asset.people.join(" ")} ${asset.tags.join(" ")} ${asset.ocr_text} ${asset.summary}`.toLowerCase();
-    let lexBoost = 0;
-    const matchedTerms: string[] = [];
-    for (const tok of qTokens) {
-      if (haystack.includes(tok)) {
-        lexBoost += 0.18;
-        matchedTerms.push(tok);
-      }
-    }
-
-    const score = Math.max(baseSim, bestMomentSim) + Math.min(0.45, lexBoost);
-    if (score < 0.16 && matchedTerms.length === 0) continue;
-
-    const reasons: string[] = [];
-    reasons.push(matchedTerms.length > 0 ? `Matched ${matchedTerms.slice(0, 3).join(", ")}` : "Multimodal vector similarity");
-    if (bestMomentSec !== null && bestMomentSim >= 0.18) {
-      reasons.push(`Video moment @ ${bestMomentSec.toFixed(1)}s`);
-    } else {
-      bestMomentSec = null;
-      bestMomentLabel = null;
-    }
-
-    hits.push({
-      asset,
-      score: Number(Math.min(0.99, score).toFixed(4)),
-      matched_moment_sec: bestMomentSec,
-      matched_moment_label: bestMomentLabel,
-      match_reason: reasons.join(" • "),
-    });
-  }
-
-  hits.sort((a, b) => b.score - a.score);
-  return hits.slice(0, limit);
+  return rankAssets(assets, qClean, { eg2, legacy }, limit);
 }
 
 async function executeSendBundle(
@@ -435,7 +380,7 @@ export default {
           status: "ok",
           architecture: "cloudflare-workers-do-d1-r2",
           domain: "fyde.izbirakin.com",
-          embedder: env.EMBEDDING_GEMMA_URL ? "embeddinggemma-2-mrl256" : "fyde-edge-mrl256",
+          embedder: env.AI ? EG2_EMBEDDER : "fyde-edge-mrl256",
         })
       );
     }
@@ -451,6 +396,35 @@ export default {
         .bind(ownerId)
         .all();
       return withCors(Response.json((results || []).map((r) => JSON.parse(String(r.data)))));
+    }
+
+    // Reindex an existing file without changing its original bytes or metadata.
+    const reindexMatch = path.match(/^\/api\/assets\/([^/]+)\/reindex$/);
+    if (reindexMatch && request.method === "POST") {
+      const user = await getAuthenticatedUser(request, env);
+      if (!user) return withCors(Response.json({ error: "Sign in to reindex files." }, { status: 401 }));
+      const assetId = decodeURIComponent(reindexMatch[1]);
+      const row = await env.DB.prepare("SELECT data FROM assets WHERE id = ?").bind(assetId).first<{ data: string }>();
+      if (!row) return withCors(Response.json({ error: "Asset not found." }, { status: 404 }));
+      const asset = JSON.parse(row.data) as IndexedAsset;
+      if (asset.owner_id !== user.id) {
+        return withCors(Response.json({ error: "Only the owner can reindex this file." }, { status: 403 }));
+      }
+      const form = (request.headers.get("Content-Type") || "").includes("multipart/form-data")
+        ? await request.formData() : null;
+      const vectors = await computeAssetVectors(env, asset, async () => {
+        if (!asset.blob_id) return null;
+        const blob = await env.BLOBS.get(asset.blob_id);
+        return blob ? { bytes: await blob.arrayBuffer(), mime: asset.mime_type } : null;
+      }, await readMediaParts(form));
+      if (vectors.embedder_name !== EG2_EMBEDDER) {
+        return withCors(Response.json({ error: "Visual indexing is unavailable. The existing index was kept." }, { status: 503 }));
+      }
+      Object.assign(asset, vectors);
+      await env.DB.prepare("UPDATE assets SET data = ? WHERE id = ?").bind(JSON.stringify(asset), asset.id).run();
+      await notifyUserHub(env, asset.owner_id, "asset_indexed", asset);
+      return withCors(Response.json({ id: asset.id, embedder_name: asset.embedder_name, dims: asset.embedding.length,
+        video_moments: asset.video_moments.map(({ timestamp_sec, label }) => ({ timestamp_sec, label })) }));
     }
 
     // Upload directly into Zero-Egress Cloudflare R2 + Index in D1
@@ -502,7 +476,7 @@ export default {
         people,
         tags,
         folder_path: "",
-        ocr_text: "",
+        ocr_text: String(form.get("ocr_text") || "").trim(),
         summary,
         video_moments: [],
         embedding: embedTextLocal(`${title} ${fname} ${location} ${people.join(" ")} ${tags.join(" ")} ${summary}`),
@@ -511,6 +485,10 @@ export default {
         download_url: `/api/blobs/${blobKey}`,
         thumbnail_url: mtype === "photo" ? `/api/blobs/${blobKey}` : "",
       };
+
+      Object.assign(asset, await computeAssetVectors(
+        env, asset, async () => ({ bytes, mime }), await readMediaParts(form)
+      ));
 
       await env.DB.prepare(
         "INSERT OR REPLACE INTO assets (id, owner_id, media_type, created_at, data) VALUES (?, ?, ?, ?, ?)"

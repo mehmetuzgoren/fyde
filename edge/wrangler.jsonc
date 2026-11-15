@@ -1,8 +1,12 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "fyde-edge",
+  "name": "fyde",
+  "account_id": "722e88ddf776f83cd48df13e0cf318f9",
   "main": "src/index.ts",
   "compatibility_date": "2026-03-01",
+  "keep_vars": true,
+  "ai": { "binding": "AI" },
+  "observability": { "enabled": true, "traces": { "enabled": true } },
   "routes": [
     {
       "pattern": "fyde.izbirakin.com",
@@ -19,7 +23,7 @@
     {
       "binding": "DB",
       "database_name": "fyde-db",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "14bb0056-41bc-4371-8b64-c2021654b718",
       "migrations_dir": "migrations"
     }
   ],

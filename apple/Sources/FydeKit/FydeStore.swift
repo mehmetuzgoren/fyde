@@ -686,13 +686,11 @@ public final class FydeStore {
         people: String = ""
     ) async {
         var tags: [String] = []
-        var summary = ""
+        var ocrText = ""
         if mimeType.hasPrefix("image/") {
             let insights = onDeviceEmbedder.extractImageInsights(data: data)
             tags.append(contentsOf: insights.sceneTags)
-            if !insights.ocrText.isEmpty {
-                summary = "On-device OCR: \(insights.ocrText.prefix(240))"
-            }
+            ocrText = insights.ocrText
         }
 
         guard let url = URL(string: "\(relayBaseURL)/api/assets/upload") else { return }
@@ -700,6 +698,7 @@ public final class FydeStore {
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        if let sessionToken { req.setValue("Bearer \(sessionToken)", forHTTPHeaderField: "Authorization") }
 
         var body = Data()
         func appendField(_ name: String, _ value: String) {
@@ -713,20 +712,52 @@ public final class FydeStore {
         appendField("location", location)
         appendField("people", people)
         appendField("tags", tags.joined(separator: ","))
-        appendField("summary", summary)
+        appendField("ocr_text", ocrText)
 
-        body.append("--\(boundary)\r\n".data(using: .utf8)!)
-        body.append("Content-Disposition: form-data; name=\"file\"; filename=\"\(filename)\"\r\n".data(using: .utf8)!)
-        body.append("Content-Type: \(mimeType)\r\n\r\n".data(using: .utf8)!)
-        body.append(data)
-        body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
+        func appendFile(_ name: String, _ partFilename: String, _ partMime: String, _ partData: Data) {
+            body.append("--\(boundary)\r\n".data(using: .utf8)!)
+            body.append("Content-Disposition: form-data; name=\"\(name)\"; filename=\"\(partFilename)\"\r\n".data(using: .utf8)!)
+            body.append("Content-Type: \(partMime)\r\n\r\n".data(using: .utf8)!)
+            body.append(partData)
+            body.append("\r\n".data(using: .utf8)!)
+        }
+
+        // The relay embeds what the photo/video shows with EmbeddingGemma 2: send a HEIC-safe
+        // ~1536 px JPEG preview of photos, and keyframes of videos (one searchable moment each).
+        if mimeType.hasPrefix("image/"), let preview = OnDeviceMultimodalEmbedder.embeddingPreviewJPEG(from: data) {
+            appendFile("preview", "preview.jpg", "image/jpeg", preview)
+        } else if mimeType.hasPrefix("video/") {
+            let (duration, frames) = await onDeviceEmbedder.extractVideoKeyframes(data: data)
+            for (i, frame) in frames.enumerated() {
+                appendFile("frame", "frame_\(i).jpg", "image/jpeg", frame.jpeg)
+            }
+            if !frames.isEmpty {
+                appendField("frame_times", frames.map { String(format: "%.2f", $0.timestampSec) }.joined(separator: ","))
+                appendField("frame_labels", frames.map { $0.label.replacingOccurrences(of: "|", with: " ") }.joined(separator: "|"))
+            }
+            if let duration { appendField("duration_sec", String(format: "%.2f", duration)) }
+        }
+
+        appendFile("file", filename, mimeType, data)
+        body.append("--\(boundary)--\r\n".data(using: .utf8)!)
         req.httpBody = body
 
-        if let (_, resp) = try? await URLSession.shared.data(for: req),
-           (resp as? HTTPURLResponse)?.statusCode == 200 {
-            statusBanner = "Indexed '\(filename)' with multimodal embeddings"
+        do {
+            let (responseData, response) = try await URLSession.shared.data(for: req)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+                statusBanner = "Could not add '\(filename)'. Please try again."
+                return
+            }
+            let asset = try? FydeJSON.makeDecoder().decode(IndexedAsset.self, from: responseData)
+            if asset?.embedderName == "embeddinggemma-2-768", asset?.embedding.count == 768 {
+                statusBanner = "Indexed '\(filename)' with EmbeddingGemma 2"
+            } else {
+                statusBanner = "Added '\(filename)'. Visual indexing is unavailable; text search is available."
+            }
             await loadMyAssets()
             await performSearch()
+        } catch {
+            statusBanner = "Could not reach Fyde to add '\(filename)'. Please try again."
         }
     }
 

@@ -19,11 +19,25 @@ Multimodal, permissioned peer-to-peer file, photo, and video sharing across **iP
   - **Starter (\$0)** · **fyde. Pro (\$12/mo or \$99/yr)** · **fyde. Household (\$19/mo or \$159/yr)**
   - **Stripe Checkout** supporting **Apple Pay**, **Google Pay**, **Stripe Link**, and **Cards**, plus **Customer Billing Portal** (`/api/billing/portal`) and HMAC-SHA256 verified **Stripe Webhooks** (`/api/billing/webhook`).
 - **Authenticated 3-Tab Layout:**
-  1. **Left Tab — Search:** 256-D MRL multimodal search across photos, video keyframe timestamps (streamed via R2 `206 Partial Content` byte ranges), and PDFs across My Library & Permitted Contacts.
+  1. **Left Tab — Search:** EmbeddingGemma 2 search across photos, video keyframe timestamps (streamed via R2 `206 Partial Content` byte ranges), and documents across My Library & Permitted Contacts. Files without a model index use local text search.
   2. **Middle Tab (Default App Landing) — `fyde. Chat`:** Conversational background sending over **Direct Fyde**, **iMessage** (via macOS `Messages.app` bridge), and **Email**, inline **Flexible Contact Permissions** (Trusted Spouse Full Access, Folderless Smart Scopes e.g. *"all my China trip photos with Alex"*, Ask-First 1-tap approvals), and accepting received bundles via chat.
   3. **Right Tab — Received:** AirDrop-like **Direct-to-Photos** saving via PhotoKit (`PHPhotoLibrary`) + pending Ask-First approval cards.
 
 ---
+
+## Image search
+
+The Cloudflare Worker uses `@cf/google/embeddinggemma-2` through its `AI` binding. It embeds photo pixels, video keyframes, and text queries into the same 768-dimensional space. The Apple app supplies JPEG previews so HEIC photos can be indexed while their original files stay intact.
+
+Apple Vision extracts text and scene tags on the device. OCR is stored in `ocr_text`, separately from the photo summary. Embeddings power search; generating a readable title or description requires a separate caption service. The upload result identifies the model that actually indexed the file. If visual indexing fails, the file remains available through text search.
+
+Existing uploads keep their previous index until their owner reindexes them. With the owner's session token in the `FYDE_TOKEN` environment variable, run from `edge/`:
+
+```bash
+node scripts/reindex-media.mjs --base https://fyde.izbirakin.com --user OWNER_ID --only ASSET_ID
+```
+
+Omit `--only` to reindex that owner's library. The script uses macOS `sips` for photo previews and `ffmpeg`/`ffprobe` for video frames. Reindexing requires an authenticated owner and preserves the previous index if the model fails. `npm run test:embeddings` checks upload, search, fallback, and reindex behavior in the local Worker runtime with mocked AI responses.
 
 ## Repository Structure
 

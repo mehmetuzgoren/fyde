@@ -9,6 +9,7 @@
     "db:migrate:remote": "CI=1 wrangler d1 migrations apply fyde-db --remote",
     "typecheck": "tsc --noEmit",
     "test": "node test_edge_e2e.mjs",
+    "test:embeddings": "node test_embeddings_e2e.mjs",
     "deploy": "cd ../web && npm run build && cd ../edge && wrangler deploy"
   },
   "devDependencies": {
