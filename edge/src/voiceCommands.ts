@@ -7,6 +7,7 @@
 //   "share those with my wife by email"  -> relationship recipient + explicit channel
 
 import type { ContactPermission, IndexedAsset, MediaType, SendChannel } from "./types";
+import { mediaTermMatch, mediaWords } from "./mediaTerms.ts";
 
 // ---------------------------------------------------------------------------
 // Wake word
@@ -257,15 +258,6 @@ export function analyzeItemPhrase(phrase: string): ItemSpec {
 // Whole-word asset matching (substring matching lets "cat" hit "location")
 // ---------------------------------------------------------------------------
 
-function stem(word: string): string {
-  let w = word.toLowerCase();
-  if (w.length > 5 && w.endsWith("ing")) w = w.slice(0, -3);
-  else if (w.length > 4 && w.endsWith("ies")) w = `${w.slice(0, -3)}y`;
-  else if (w.length > 3 && w.endsWith("es") && /(sh|ch|x|z|ss)es$/.test(w)) w = w.slice(0, -2);
-  else if (w.length > 3 && w.endsWith("s") && !w.endsWith("ss")) w = w.slice(0, -1);
-  return w;
-}
-
 export function assetWordSet(asset: IndexedAsset): Set<string> {
   const text = [
     asset.title,
@@ -280,27 +272,11 @@ export function assetWordSet(asset: IndexedAsset): Set<string> {
   ]
     .join(" ")
     .toLowerCase();
-  return new Set((text.match(/[a-z0-9]+/g) || []).map(stem));
+  return mediaWords(text);
 }
 
 export function countWordMatches(contentTokens: string[], words: Set<string>): number {
-  let n = 0;
-  for (const tok of contentTokens) {
-    const s = stem(tok);
-    if (words.has(s)) {
-      n++;
-      continue;
-    }
-    if (s.length >= 4) {
-      for (const w of words) {
-        if (w.startsWith(s) || (w.length >= 4 && s.startsWith(w))) {
-          n++;
-          break;
-        }
-      }
-    }
-  }
-  return n;
+  return contentTokens.filter((token) => mediaTermMatch(token, words) > 0).length;
 }
 
 export interface RankedAsset {

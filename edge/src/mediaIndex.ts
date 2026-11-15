@@ -12,6 +12,7 @@
 // keep their old scoring until they are re-indexed (POST /api/assets/:id/reindex).
 
 import { cosineSimilarity, embedTextLocal } from "./embedder";
+import { mediaTermMatch, mediaWords, stemMediaWord } from "./mediaTerms";
 import type { Env, IndexedAsset, SearchHit, VideoMoment } from "./types";
 
 export const EG2_MODEL = "@cf/google/embeddinggemma-2";
@@ -390,18 +391,10 @@ export function queryTerms(query: string): string[] {
   for (const w of words) {
     if (w.length < 2 || STOP_WORDS.has(w)) continue;
     // Light stemming so "laptops" finds "laptop" and "cats" finds "cat".
-    const stem = w.length > 4 && w.endsWith("es") ? w.slice(0, -2) : w.length > 3 && w.endsWith("s") ? w.slice(0, -1) : w;
+    const stem = stemMediaWord(w);
     if (!out.includes(stem)) out.push(stem);
   }
   return out;
-}
-
-function escapeRegex(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function matchesWordStart(haystack: string, term: string): boolean {
-  return new RegExp(`(^|[^\\p{L}\\p{N}])${escapeRegex(term)}`, "iu").test(haystack);
 }
 
 function assetHaystack(a: IndexedAsset): string {
@@ -454,6 +447,7 @@ export interface QueryVectors {
 export function rankAssets(assets: IndexedAsset[], query: string, q: QueryVectors, limit: number): SearchHit[] {
   const terms = queryTerms(query);
   const hits: SearchHit[] = [];
+  const wordMatches = new Set<string>();
 
   // --- EmbeddingGemma 2 assets: calibrated semantic score + exact-word coverage ---
   const eg2 = q.eg2 ? assets.filter(isEg2Asset) : [];
@@ -469,9 +463,11 @@ export function rankAssets(assets: IndexedAsset[], query: string, q: QueryVector
         moment = m;
       }
     }
-    const hay = assetHaystack(asset);
-    const matched = terms.filter((t) => matchesWordStart(hay, t));
-    return { asset, cos: Math.max(base, momentCos), moment, matched };
+    const words = mediaWords(assetHaystack(asset));
+    const matched = terms.filter((t) => mediaTermMatch(t, words) > 0);
+    const lexical = terms.reduce((sum, term) => sum + mediaTermMatch(term, words), 0);
+    if (matched.length > 0) wordMatches.add(asset.id);
+    return { asset, cos: Math.max(base, momentCos), moment, matched, lexical };
   });
   const z = poolZScores(
     scored.map((s) => s.cos),
@@ -484,7 +480,7 @@ export function rankAssets(assets: IndexedAsset[], query: string, q: QueryVector
     const semanticOk = s.cos >= cal.gate && (scored.length < 4 || z[i] >= 0.5);
     if (s.matched.length === 0 && !semanticOk) return;
     const conf = Math.min(1, Math.max(0, (s.cos - cal.floor) / cal.span));
-    const coverage = terms.length > 0 ? s.matched.length / terms.length : 0;
+    const coverage = terms.length > 0 ? s.lexical / terms.length : 0;
     const score = Math.min(0.99, SEMANTIC_WEIGHT * conf + LEXICAL_WEIGHT * coverage);
 
     const reasons: string[] = [];
@@ -516,16 +512,18 @@ export function rankAssets(assets: IndexedAsset[], query: string, q: QueryVector
     for (const m of asset.video_moments || []) {
       if (!legacyQ || m.embedding?.length === EG2_DIM) continue;
       let mSim = cosineSimilarity(legacyQ, m.embedding);
-      if (terms.some((tok) => m.label.toLowerCase().includes(tok))) mSim += 0.22;
+      if (terms.some((tok) => mediaTermMatch(tok, mediaWords(m.label)) > 0)) mSim += 0.22;
       if (mSim > bestMomentSim) {
         bestMomentSim = mSim;
         bestMomentSec = m.timestamp_sec;
         bestMomentLabel = m.label;
       }
     }
-    const hay = assetHaystack(asset);
-    const matched = terms.filter((t) => hay.includes(t));
-    const score = Math.max(baseSim, bestMomentSim) + Math.min(0.45, matched.length * 0.18);
+    const words = mediaWords(assetHaystack(asset));
+    const matched = terms.filter((t) => mediaTermMatch(t, words) > 0);
+    const lexical = terms.reduce((sum, term) => sum + mediaTermMatch(term, words), 0);
+    if (matched.length > 0) wordMatches.add(asset.id);
+    const score = Math.max(baseSim, bestMomentSim) + Math.min(0.45, lexical * 0.18);
     if (score < 0.16 && matched.length === 0) continue;
     const reasons = [matched.length > 0 ? `Matched ${matched.slice(0, 3).join(", ")}` : "Text similarity"];
     if (bestMomentSec !== null && bestMomentSim >= 0.18) {
@@ -549,6 +547,6 @@ export function rankAssets(assets: IndexedAsset[], query: string, q: QueryVector
   const top = eg2Hits.reduce((m, h) => Math.max(m, h.score), 0);
   const best = hits[0]?.score ?? 0;
   const ratio = best >= STRONG_SCORE ? RELATIVE_CUT_STRONG : RELATIVE_CUT_WEAK;
-  const kept = top > 0 ? hits.filter((h) => h.score >= best * ratio) : hits;
+  const kept = top > 0 ? hits.filter((h) => wordMatches.has(h.asset.id) || h.score >= best * ratio) : hits;
   return kept.slice(0, limit);
 }
