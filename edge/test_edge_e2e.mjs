@@ -2,12 +2,17 @@ import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { runVoiceSendScenarios } from "./test_voice_send_e2e.mjs";
 
-const BASE = "http://127.0.0.1:8789";
+const reservation = createServer();
+await new Promise((ready) => reservation.listen(0, "127.0.0.1", ready));
+const port = reservation.address().port;
+await new Promise((closed) => reservation.close(closed));
+const BASE = `http://127.0.0.1:${port}`;
 const run = promisify(execFile);
 
 async function waitForReady(url, timeoutMs = 20000) {
@@ -29,15 +34,44 @@ async function main() {
   const state = await mkdtemp(join(tmpdir(), "fyde-edge-e2e-"));
   const env = { ...process.env, CI: "1" };
   const wrangler = "./node_modules/.bin/wrangler";
-  await run(wrangler, ["d1", "migrations", "apply", "fyde-db", "--local", "--persist-to", state], { env });
+  const config = join(state, "wrangler.json");
+  const entry = join(state, "worker.ts");
+  await writeFile(config, JSON.stringify({
+    name: "fyde-edge-test", main: entry, compatibility_date: "2026-03-01",
+    assets: { directory: resolve("../web/dist"), binding: "ASSETS", not_found_handling: "single-page-application", run_worker_first: ["/api/*", "/ws/*"] },
+    d1_databases: [{ binding: "DB", database_name: "fyde-db", database_id: "00000000-0000-0000-0000-000000000000", migrations_dir: resolve("migrations") }],
+    r2_buckets: [{ binding: "BLOBS", bucket_name: "fyde-test-blobs" }],
+    durable_objects: { bindings: [{ name: "USER_HUB", class_name: "UserRelayHub" }] },
+    migrations: [{ tag: "v1", new_sqlite_classes: ["UserRelayHub"] }],
+    vars: { PUBLIC_APP_URL: "https://fyde.izbirakin.com", REQUIRE_INVITE_CODE: "false" },
+  }));
+  // Update fixtures through the same workerd connection as requests. A second
+  // process writing the live SQLite file can leave the Worker reading stale pages.
+  // This route exists only in the temporary test entry, never in the deployed app.
+  await writeFile(entry, `
+    import worker from ${JSON.stringify(resolve("src/index.ts"))};
+    export { UserRelayHub } from ${JSON.stringify(resolve("src/index.ts"))};
+    export default {
+      async fetch(request, env) {
+        if (new URL(request.url).pathname === "/api/__test/sql" && request.method === "POST") {
+          const body = await request.json();
+          const statements = body.sql.trim().split(/;\\s*(?:\\n|$)/).filter((sql) => sql.trim());
+          return Response.json(await env.DB.batch(statements.map((sql) => env.DB.prepare(sql))));
+        }
+        return worker.fetch(request, env);
+      }
+    };
+  `);
+  await run(wrangler, ["d1", "migrations", "apply", "fyde-db", "--local", "--persist-to", state, "--config", config], { env });
   const executeSql = async (sql) => {
-    const file = join(state, "fixture.sql");
-    await writeFile(file, sql);
-    await run(wrangler, ["d1", "execute", "fyde-db", "--local", "--persist-to", state, "--file", file], { env });
+    const response = await fetch(`${BASE}/api/__test/sql`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sql }),
+    });
+    assert.equal(response.status, 200, await response.text());
   };
   const proc = spawn(
     wrangler,
-    ["dev", "--local", "--persist-to", state, "--port", "8789", "--inspector-port", "0", "--ip", "127.0.0.1", "--show-interactive-dev-session=false"],
+    ["dev", "--local", "--persist-to", state, "--config", config, "--port", String(port), "--inspector-port", "0", "--ip", "127.0.0.1", "--show-interactive-dev-session=false"],
     { stdio: ["ignore", "pipe", "pipe"], env }
   );
 
@@ -151,7 +185,7 @@ async function main() {
 
     // 7. Durable Object WebSocket Hibernation + Multimodal Search + Smart Scope Pull + R2 Range Streaming
     const wsEvents = [];
-    const ws = new WebSocket(`ws://127.0.0.1:8789/ws/maya?device_id=test_ios&platform=ios`);
+    const ws = new WebSocket(`${BASE.replace(/^http/, "ws")}/ws/maya?device_id=test_ios&platform=ios`);
     await new Promise((resolve, reject) => {
       ws.addEventListener("open", resolve);
       ws.addEventListener("error", reject);
