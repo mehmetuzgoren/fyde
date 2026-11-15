@@ -27,7 +27,7 @@ try {
     r2_buckets: [{ binding: "BLOBS", bucket_name: "fyde-test-blobs" }],
     durable_objects: { bindings: [{ name: "USER_HUB", class_name: "UserRelayHub" }] },
     migrations: [{ tag: "v1", new_sqlite_classes: ["UserRelayHub"] }],
-    vars: { REQUIRE_INVITE_CODE: "false" },
+    vars: { REQUIRE_INVITE_CODE: "false", ALLOW_DEMO_AUTH: "true" },
   }));
   await writeFile(entry, `
     import worker from ${JSON.stringify(resolve("src/index.ts"))};

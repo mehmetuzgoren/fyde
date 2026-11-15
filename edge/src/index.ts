@@ -1402,7 +1402,7 @@ export default {
         people,
         tags,
         folder_path: "",
-        ocr_text: "",
+        ocr_text: String(form.get("ocr_text") || "").trim(),
         summary,
         video_moments: [],
         embedding: embedTextLocal(`${title} ${fname} ${location} ${people.join(" ")} ${tags.join(" ")} ${summary}`),
