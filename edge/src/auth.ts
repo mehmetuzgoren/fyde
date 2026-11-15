@@ -11,6 +11,15 @@ import type { Env, PlanTier, UserProfile } from "./types";
 
 const SESSION_COOKIE = "fyde_session";
 
+export function normalizeHandle(raw: string): string {
+  return raw
+    .trim()
+    .toLowerCase()
+    .replace(/^@+/, "")
+    .replace(/[^a-z0-9_]/g, "")
+    .slice(0, 24);
+}
+
 export function rowToUserProfile(row: Record<string, unknown>): UserProfile {
   return {
     id: String(row.id),
@@ -18,7 +27,8 @@ export function rowToUserProfile(row: Record<string, unknown>): UserProfile {
     display_name: String(row.display_name),
     email: String(row.email),
     phone: String(row.phone || ""),
-    avatar_color: String(row.avatar_color || "#293022"),
+    avatar_color: String(row.avatar_color || "#FF5500"),
+    bio: String(row.bio || ""),
     auth_provider: String(row.auth_provider || "email"),
     plan_tier: (String(row.plan_tier || "starter") as PlanTier),
     billing_interval: String(row.billing_interval || "monthly"),
@@ -70,6 +80,25 @@ export async function getAuthenticatedUser(request: Request, env: Env): Promise<
 
   const row = await env.DB.prepare("SELECT * FROM users WHERE id = ?").bind(claims.sub).first();
   return row ? rowToUserProfile(row) : null;
+}
+
+export async function resolveActorUserId(
+  request: Request,
+  env: Env,
+  fallbackUserId?: string | null
+): Promise<{ userId: string } | { error: Response }> {
+  const authUser = await getAuthenticatedUser(request, env);
+  if (authUser) {
+    return { userId: authUser.id };
+  }
+  if (env.REQUIRE_AUTH === "true") {
+    return { error: Response.json({ error: "Authentication required." }, { status: 401 }) };
+  }
+  const fallback = (fallbackUserId || "").trim();
+  if (!fallback) {
+    return { error: Response.json({ error: "Missing user_id or session token." }, { status: 400 }) };
+  }
+  return { userId: fallback };
 }
 
 async function sendTransactionalEmail(
@@ -168,12 +197,20 @@ export async function handleWaitlistAndAuthRoutes(request: Request, env: Env, ur
       return Response.json({ error: "Please enter a valid email address." }, { status: 400 });
     }
 
+    const cleanHandle = (body.name || "").trim().replace(/^@+/, "");
+
     const existing = await env.DB.prepare("SELECT * FROM waitlist_entries WHERE email = ?").bind(email).first();
     if (existing) {
+      if (cleanHandle && existing.name !== cleanHandle) {
+        await env.DB.prepare("UPDATE waitlist_entries SET name = ? WHERE email = ?")
+          .bind(cleanHandle, email)
+          .run();
+        existing.name = cleanHandle;
+      }
       return Response.json({
         already_joined: true,
         entry: existing,
-        message: `You're already on the fyde. waitlist at spot #${existing.position}!`,
+        message: `You're already on the fyde. waitlist at spot #${existing.position}.`,
       });
     }
 
@@ -192,7 +229,7 @@ export async function handleWaitlistAndAuthRoutes(request: Request, env: Env, ur
       .bind(
         id,
         email,
-        (body.name || "").trim(),
+        cleanHandle,
         body.platform_interest || "ios_macos",
         referralCode,
         (body.referred_by || "").trim(),
@@ -205,11 +242,13 @@ export async function handleWaitlistAndAuthRoutes(request: Request, env: Env, ur
     await sendTransactionalEmail(
       env,
       email,
-      `You're #${position} on the fyde. waitlist`,
-      `<div style="font-family:sans-serif;color:#293022;background:#F8F9F4;padding:28px;border-radius:14px">
-        <h2 style="margin:0 0 12px">fyde<span style="color:#BF5134">.</span></h2>
-        <p>You're officially <strong>#${position}</strong> in line for early access on iPhone, Mac, and Web.</p>
-        <p>Share your referral code <strong>${referralCode}</strong> to move up the queue.</p>
+      cleanHandle
+        ? `@${cleanHandle} reserved — #${position} on the fyde. waitlist`
+        : `You're #${position} on the fyde. waitlist`,
+      `<div style="font-family:sans-serif;color:#0A0A0A;background:#FFFFFF;border:2px solid #0A0A0A;padding:28px;border-radius:16px">
+        <h2 style="margin:0 0 12px">fyde<span style="color:#FF5500">.</span></h2>
+        <p>${cleanHandle ? `Your handle <strong>@${cleanHandle}</strong> is reserved. ` : ""}You're <strong>#${position}</strong> on the waitlist.</p>
+        <p>Pass code: <strong>${inviteCode}</strong></p>
       </div>`
     );
 
@@ -217,7 +256,7 @@ export async function handleWaitlistAndAuthRoutes(request: Request, env: Env, ur
     return Response.json({
       already_joined: false,
       entry: saved,
-      message: `You're in! Reserved spot #${position} on fyde.izbirakin.com.`,
+      message: `Reserved spot #${position} on the fyde. waitlist.`,
     });
   }
 
@@ -243,6 +282,52 @@ export async function handleWaitlistAndAuthRoutes(request: Request, env: Env, ur
         "Set-Cookie": clearSessionCookie(),
       },
     });
+  }
+
+  // ---------- Update @handle, Display Name & Bio ----------
+  if ((path === "/api/auth/handle" || path === "/api/users/me") && (request.method === "PATCH" || request.method === "POST")) {
+    const body = (await request.json()) as {
+      user_id?: string;
+      handle?: string;
+      display_name?: string;
+      bio?: string;
+    };
+    const actor = await resolveActorUserId(request, env, body.user_id);
+    if ("error" in actor) return actor.error;
+
+    const currentRow = await env.DB.prepare("SELECT * FROM users WHERE id = ?").bind(actor.userId).first();
+    if (!currentRow) return Response.json({ error: "User not found." }, { status: 404 });
+
+    let nextHandle = String(currentRow.handle);
+    if (typeof body.handle === "string" && body.handle.trim()) {
+      const cleaned = normalizeHandle(body.handle);
+      if (cleaned.length < 3) {
+        return Response.json({ error: "Handle must be at least 3 letters, numbers, or underscores." }, { status: 400 });
+      }
+      const conflict = await env.DB.prepare("SELECT id FROM users WHERE LOWER(handle) = ? AND id != ?")
+        .bind(cleaned, actor.userId)
+        .first();
+      if (conflict) {
+        return Response.json({ error: `@${cleaned} is already taken.` }, { status: 409 });
+      }
+      nextHandle = cleaned;
+    }
+
+    const nextDisplayName =
+      typeof body.display_name === "string" && body.display_name.trim()
+        ? body.display_name.trim().slice(0, 60)
+        : String(currentRow.display_name);
+    const nextBio =
+      typeof body.bio === "string"
+        ? body.bio.trim().slice(0, 160)
+        : String(currentRow.bio || "");
+
+    await env.DB.prepare("UPDATE users SET handle = ?, display_name = ?, bio = ? WHERE id = ?")
+      .bind(nextHandle, nextDisplayName, nextBio, actor.userId)
+      .run();
+
+    const updated = await env.DB.prepare("SELECT * FROM users WHERE id = ?").bind(actor.userId).first();
+    return issueAuthResponse(rowToUserProfile(updated!), request, env);
   }
 
   // ---------- Email + Password Register & Login ----------
@@ -278,8 +363,14 @@ export async function handleWaitlistAndAuthRoutes(request: Request, env: Env, ur
       return Response.json({ error: "An account with this email already exists. Please log in." }, { status: 409 });
     }
 
-    const rawHandle = (body.handle || email.split("@")[0]).toLowerCase().replace(/[^a-z0-9_]/g, "");
-    const handleExists = await env.DB.prepare("SELECT id FROM users WHERE handle = ?").bind(rawHandle).first();
+    const requestedHandle = body.handle ? normalizeHandle(body.handle) : "";
+    const rawHandle = requestedHandle.length >= 3
+      ? requestedHandle
+      : (email.split("@")[0] || "member").toLowerCase().replace(/[^a-z0-9_]/g, "") || "member";
+    const handleExists = await env.DB.prepare("SELECT id FROM users WHERE LOWER(handle) = ?").bind(rawHandle).first();
+    if (requestedHandle.length >= 3 && handleExists) {
+      return Response.json({ error: `@${requestedHandle} is already taken. Try another handle.` }, { status: 409 });
+    }
     const handle = handleExists ? `${rawHandle}_${Math.floor(10 + Math.random() * 89)}` : rawHandle;
     const displayName = (body.display_name || rawHandle).trim();
     const pwHash = await hashPasswordPBKDF2(password);
@@ -332,11 +423,11 @@ export async function handleWaitlistAndAuthRoutes(request: Request, env: Env, ur
       env,
       email,
       `${code} is your fyde. sign-in code`,
-      `<div style="font-family:sans-serif;color:#293022;background:#F8F9F4;padding:28px;border-radius:14px">
-        <h2 style="margin:0 0 12px">fyde<span style="color:#BF5134">.</span></h2>
+      `<div style="font-family:sans-serif;color:#0A0A0A;background:#FFFFFF;border:2px solid #0A0A0A;padding:28px;border-radius:16px">
+        <h2 style="margin:0 0 12px">fyde<span style="color:#FF5500">.</span></h2>
         <p>Your 6-digit verification code is:</p>
-        <div style="font-size:28px;font-weight:700;letter-spacing:6px;margin:14px 0">${code}</div>
-        <p style="font-size:12px;color:#5C6454">Expires in 10 minutes.</p>
+        <div style="font-size:28px;font-weight:800;letter-spacing:6px;margin:14px 0;color:#FF5500">${code}</div>
+        <p style="font-size:12px;color:#666666">Expires in 10 minutes.</p>
       </div>`
     );
 
@@ -349,7 +440,7 @@ export async function handleWaitlistAndAuthRoutes(request: Request, env: Env, ur
   }
 
   if (path === "/api/auth/email/verify-code" && request.method === "POST") {
-    const body = (await request.json()) as { email?: string; code?: string; display_name?: string };
+    const body = (await request.json()) as { email?: string; code?: string; display_name?: string; handle?: string };
     const email = (body.email || "").toLowerCase().trim();
     const code = (body.code || "").trim();
 
@@ -365,8 +456,12 @@ export async function handleWaitlistAndAuthRoutes(request: Request, env: Env, ur
 
     let userRow = await env.DB.prepare("SELECT * FROM users WHERE email = ?").bind(email).first();
     if (!userRow) {
-      const baseHandle = email.split("@")[0].replace(/[^a-z0-9_]/g, "") || "member";
-      const handle = `${baseHandle}_${Math.floor(10 + Math.random() * 89)}`;
+      const requested = body.handle ? normalizeHandle(body.handle) : "";
+      const baseHandle = requested.length >= 3
+        ? requested
+        : email.split("@")[0].replace(/[^a-z0-9_]/g, "") || "member";
+      const conflict = await env.DB.prepare("SELECT id FROM users WHERE LOWER(handle) = ?").bind(baseHandle).first();
+      const handle = conflict ? `${baseHandle}_${Math.floor(10 + Math.random() * 89)}` : baseHandle;
       const id = randomId("usr", 10);
       await env.DB.prepare(
         `INSERT INTO users (id, handle, display_name, email, auth_provider, plan_tier, created_at)
@@ -381,7 +476,7 @@ export async function handleWaitlistAndAuthRoutes(request: Request, env: Env, ur
 
   // ---------- Google OAuth 2.0 ----------
   if (path === "/api/auth/google/start" && request.method === "GET") {
-    const appOrigin = env.PUBLIC_APP_URL || url.origin;
+    const appOrigin = url.origin;
     if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET) {
       return Response.redirect(`${appOrigin}/?auth_notice=google_not_configured`, 302);
     }
@@ -401,12 +496,18 @@ export async function handleWaitlistAndAuthRoutes(request: Request, env: Env, ur
   }
 
   if (path === "/api/auth/google/callback" && request.method === "GET") {
+    const providerError = url.searchParams.get("error");
+    if (providerError) {
+      const reason = providerError === "access_denied" ? "google_cancelled" : "google_failed";
+      return Response.redirect(`${url.origin}/?auth_error=${reason}`, 302);
+    }
     const code = url.searchParams.get("code") || "";
     const state = url.searchParams.get("state") || "";
     const stRow = await env.DB.prepare("SELECT * FROM oauth_states WHERE state = ? AND provider = 'google'")
       .bind(state)
       .first();
-    if (!stRow || !code || !env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET) {
+    const stateExpired = !stRow || Number(stRow.expires_at) < Math.floor(Date.now() / 1000);
+    if (stateExpired || !code || !env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET) {
       return Response.redirect(`${url.origin}/?auth_error=google_state_invalid`, 302);
     }
     await env.DB.prepare("DELETE FROM oauth_states WHERE state = ?").bind(state).run();
@@ -429,7 +530,13 @@ export async function handleWaitlistAndAuthRoutes(request: Request, env: Env, ur
     const profileRes = await fetch("https://openidconnect.googleapis.com/v1/userinfo", {
       headers: { Authorization: `Bearer ${tokens.access_token}` },
     });
-    const profile = (await profileRes.json()) as { sub: string; email: string; name?: string };
+    if (!profileRes.ok) {
+      return Response.redirect(`${url.origin}/?auth_error=google_failed`, 302);
+    }
+    const profile = (await profileRes.json()) as { sub: string; email?: string; name?: string };
+    if (!profile.sub || !profile.email) {
+      return Response.redirect(`${url.origin}/?auth_error=google_failed`, 302);
+    }
     const user = await findOrCreateOAuthUser(env, {
       email: profile.email,
       displayName: profile.name || profile.email.split("@")[0],
@@ -448,7 +555,7 @@ export async function handleWaitlistAndAuthRoutes(request: Request, env: Env, ur
 
   // ---------- Sign in with Apple (Web OIDC & Native iOS/macOS `SignInWithAppleButton`) ----------
   if (path === "/api/auth/apple/start" && request.method === "GET") {
-    const appOrigin = env.PUBLIC_APP_URL || url.origin;
+    const appOrigin = url.origin;
     if (!env.APPLE_CLIENT_ID) {
       return Response.redirect(`${appOrigin}/?auth_notice=apple_not_configured`, 302);
     }
@@ -469,15 +576,43 @@ export async function handleWaitlistAndAuthRoutes(request: Request, env: Env, ur
 
   if (path === "/api/auth/apple/callback" && request.method === "POST") {
     const form = await request.formData();
+    const providerError = String(form.get("error") || "");
+    if (providerError) {
+      const reason = providerError === "user_cancelled_authorize" ? "apple_cancelled" : "apple_failed";
+      return Response.redirect(`${url.origin}/?auth_error=${reason}`, 302);
+    }
+
+    const state = String(form.get("state") || "");
+    const stRow = await env.DB.prepare("SELECT * FROM oauth_states WHERE state = ? AND provider = 'apple'")
+      .bind(state)
+      .first();
+    const stateExpired = !stRow || Number(stRow.expires_at) < Math.floor(Date.now() / 1000);
+    if (stateExpired || !env.APPLE_CLIENT_ID) {
+      return Response.redirect(`${url.origin}/?auth_error=apple_state_invalid`, 302);
+    }
+    await env.DB.prepare("DELETE FROM oauth_states WHERE state = ?").bind(state).run();
+
     const idToken = String(form.get("id_token") || "");
     const verified = await verifyAppleIdentityToken(idToken, env.APPLE_CLIENT_ID);
     if (!verified) {
       return Response.redirect(`${url.origin}/?auth_error=apple_token_invalid`, 302);
     }
+
+    // Apple only sends the user's name (as JSON in `user`) on the very first authorization.
+    let firstTimeName = "";
+    try {
+      const userJson = JSON.parse(String(form.get("user") || "{}")) as {
+        name?: { firstName?: string; lastName?: string };
+      };
+      firstTimeName = [userJson.name?.firstName, userJson.name?.lastName].filter(Boolean).join(" ").trim();
+    } catch {
+      firstTimeName = "";
+    }
+
     const email = verified.email || `${verified.sub.slice(0, 10)}@privaterelay.appleid.com`;
     const user = await findOrCreateOAuthUser(env, {
       email,
-      displayName: email.split("@")[0],
+      displayName: firstTimeName || email.split("@")[0],
       provider: "apple",
       providerSub: verified.sub,
     });
@@ -511,8 +646,11 @@ export async function handleWaitlistAndAuthRoutes(request: Request, env: Env, ur
     return issueAuthResponse(user, request, env);
   }
 
-  // ---------- Sandbox / Founder Quick Switch (`Mehmet`, `Maya`, `Alex`, `Sarah`) ----------
+  // ---------- Sandbox / Founder Quick Switch (disabled unless ALLOW_DEMO_AUTH=true) ----------
   if (path === "/api/auth/demo" && request.method === "POST") {
+    if (env.ALLOW_DEMO_AUTH !== "true") {
+      return Response.json({ error: "Demo login is disabled." }, { status: 403 });
+    }
     const body = (await request.json()) as { handle?: string };
     const handle = (body.handle || "mehmet").toLowerCase();
     const row = await env.DB.prepare("SELECT * FROM users WHERE handle = ? OR id = ?")

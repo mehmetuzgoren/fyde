@@ -150,7 +150,12 @@ function matchesSmartScope(asset: IndexedAsset, rule: SmartScopeRule, _qVec?: nu
     const lexHit = words.length > 0 && words.every((w) => haystack.includes(w));
     if (!lexHit) {
       const rVec = embedTextLocal(rule.semantic_query);
-      if (cosineSimilarity(rVec, asset.embedding) < (rule.similarity_threshold || 0.24)) return false;
+      // Smart scopes retain their text-based rules when an asset has a visual index.
+      // A hashed rule vector and an EmbeddingGemma vector belong to different spaces.
+      const scopeVec = asset.embedder_name === "fyde-edge-mrl256" && asset.embedding.length === EMBEDDING_DIM
+        ? asset.embedding
+        : embedTextLocal(`${asset.title} ${asset.filename} ${asset.location} ${asset.people.join(" ")} ${asset.tags.join(" ")} ${asset.summary} ${asset.ocr_text}`);
+      if (cosineSimilarity(rVec, scopeVec) < (rule.similarity_threshold || 0.24)) return false;
     }
   }
   return true;

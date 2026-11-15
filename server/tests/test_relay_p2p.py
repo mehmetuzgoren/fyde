@@ -4,6 +4,117 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from app.main import create_app
+from app.models import ChatMessage
+
+
+def test_wrist_commands_persist_and_broadcast_both_chat_turns(tmp_path: Path) -> None:
+    app = create_app(data_dir=tmp_path / "wrist_history")
+    with TestClient(app) as client:
+        for i in range(85):
+            app.state.storage.append_chat_message(ChatMessage(
+                id=f"old_wrist_{i}", user_id="mehmet", role="user", text="Older chat",
+                created_at="2025-01-01T00:00:00.000Z",
+            ))
+
+        # The receiver posts without an app or a WebSocket connection.
+        payload = {"user_id": "mehmet", "text": "Send the China photos to Maya", "platform": "vexo-band-69", "source": "vexo", "client_message_id": "wrist_1"}
+        response = client.post("/api/chat", json=payload)
+        assert response.status_code == 200
+        reply = response.json()
+        assert reply["source"] == "vexo"
+        assert reply["action_card"]["action_type"] == "send_completed"
+        history = client.get("/api/chat/mehmet").json()
+        assert len(history) == 80
+        assert history[-2]["text"] == payload["text"]
+        assert history[-2]["client_message_id"] == "wrist_1"
+        assert history[-1]["id"] == reply["id"]
+
+        # An open app sees the transcript as well as the result of a later command.
+        with client.websocket_connect("/ws/mehmet?device_id=chat_history&platform=web") as socket:
+            assert socket.receive_json()["event"] == "connected"
+            response = client.post("/api/chat", json={**payload, "text": "Find my China photos", "client_message_id": "wrist_2"})
+            assert response.status_code == 200
+            turns = []
+            while len(turns) < 2:
+                event = socket.receive_json()
+                if event["event"] == "chat_message":
+                    turns.append(event["payload"])
+            assert [turn["role"] for turn in turns] == ["user", "assistant"]
+            assert all(turn["source"] == "vexo" for turn in turns)
+
+
+def test_received_files_are_searchable_without_library_access(tmp_path: Path) -> None:
+    app = create_app(data_dir=tmp_path / "received_search")
+    with TestClient(app) as client:
+        def search(scope: str = "all", query: str = "tax return", **filters: object) -> list[dict]:
+            response = client.post(
+                "/api/search",
+                json={"user_id": "sarah", "query": query, "scope": scope, **filters},
+            )
+            assert response.status_code == 200
+            return response.json()
+
+        asset_id = "asset_tax_return_2025"
+        assert not any(hit["asset"]["id"] == asset_id for hit in search())
+
+        # Repeated shares appear once, using the most recent bundle's destination.
+        for title in ("Tax documents", "Latest tax documents"):
+            response = client.post(
+                "/api/send",
+                json={
+                    "sender_id": "mehmet",
+                    "asset_ids": [asset_id],
+                    "recipient_name": "Sarah",
+                    "recipient_user_id": "sarah",
+                    "channel": "fyde_direct",
+                    "title": title,
+                },
+            )
+            assert response.status_code == 200
+        bundle = response.json()
+
+        for scope in ("all", "contacts"):
+            hits = search(scope)
+            matches = [hit for hit in hits if hit["asset"]["id"] == asset_id]
+            assert len(matches) == 1
+            assert matches[0]["asset"]["owner_id"] == "mehmet"
+            assert matches[0]["asset"]["folder_path"] == "Received/Latest tax documents"
+            assert matches[0]["match_reason"].startswith("Received from Mehmet")
+            assert any(hit["asset"]["id"] == asset_id for hit in search(scope, ""))
+            assert any(hit["asset"]["id"] == asset_id for hit in search(scope, media_type="document"))
+            assert not any(hit["asset"]["id"] == asset_id for hit in search(scope, media_type="photo"))
+            assert not any(hit["asset"]["id"] == asset_id for hit in search(scope, contact_owner_id="maya"))
+        assert not any(hit["asset"]["id"] == asset_id for hit in search("mine"))
+        alex_hits = client.post(
+            "/api/search", json={"user_id": "alex", "query": "tax return", "scope": "all"}
+        ).json()
+        assert not any(hit["asset"]["id"] == asset_id for hit in alex_hits)
+
+        # Granting library access must not duplicate an already received file.
+        permission = client.post(
+            "/api/permissions",
+            json={"owner_id": "mehmet", "contact_user_id": "sarah", "contact_name": "Sarah", "tier": "trusted"},
+        )
+        assert permission.status_code == 200
+        for scope in ("all", "contacts"):
+            assert len([hit for hit in search(scope) if hit["asset"]["id"] == asset_id]) == 1
+
+        accepted = client.post(
+            f"/api/bundles/{bundle['id']}/accept",
+            json={"user_id": "sarah", "destination_type": "files", "album_or_folder": "Taxes"},
+        )
+        assert accepted.status_code == 200
+        source_url = bundle["items"][0]["download_url"]
+        assert len([hit for hit in search() if hit["asset"]["download_url"] == source_url]) == 1
+        assert any(hit["asset"]["download_url"] == source_url for hit in search("mine"))
+
+        # A received file remains searchable from its bundle if the sender's index disappears.
+        with app.state.storage._conn() as connection:
+            connection.execute("DELETE FROM assets WHERE id = ?", (asset_id,))
+        fallback = next(hit for hit in search("contacts") if hit["asset"]["id"] == asset_id)
+        assert fallback["asset"]["download_url"] == bundle["items"][0]["download_url"]
+        assert "Taxes" in fallback["asset"]["folder_path"]
+        assert fallback["match_reason"].startswith("Received from Mehmet")
 
 
 def test_full_fyde_p2p_multimodal_and_permissions_flow(tmp_path: Path) -> None:

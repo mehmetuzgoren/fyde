@@ -315,6 +315,73 @@ class FydeStorage:
         limit: int = 20,
     ) -> list[SearchHit]:
         assets = self.list_assets(owner_id=owner_id, media_type=media_type)
+        return self._rank_assets(assets, query, limit)
+
+    def search_library(
+        self,
+        user_id: str,
+        query: str,
+        media_type: MediaType | None = None,
+        limit: int = 20,
+        *,
+        include_own: bool = True,
+        include_received: bool = True,
+        contact_owner_id: str | None = None,
+    ) -> list[SearchHit]:
+        assets = self.list_assets(owner_id=user_id, media_type=media_type) if include_own else []
+        seen = {asset.id for asset in assets}
+        own_sources = {asset.download_url for asset in assets if asset.download_url and asset.download_url != "#"}
+        received_at: dict[str, str] = {}
+        if include_received:
+            # Bundles are newest first, so a repeated delivery contributes one result.
+            for bundle in self.list_received_bundles(user_id):
+                if bundle.sender_id == user_id:
+                    continue
+                if contact_owner_id and bundle.sender_id != contact_owner_id:
+                    continue
+                for item in bundle.items:
+                    if (item.asset_id in seen or item.download_url in own_sources
+                            or (media_type and item.media_type != media_type)):
+                        continue
+                    seen.add(item.asset_id)
+                    folder = bundle.accepted_destination or f"Received/{bundle.title}"
+                    original = self.get_asset(item.asset_id)
+                    if original:
+                        asset = original.model_copy(update={
+                            "owner_name": bundle.sender_name or original.owner_name,
+                            "folder_path": folder,
+                        })
+                    else:
+                        asset = IndexedAsset(
+                            id=item.asset_id,
+                            owner_id=bundle.sender_id,
+                            owner_name=bundle.sender_name,
+                            filename=item.filename,
+                            title=item.title,
+                            media_type=item.media_type,
+                            mime_type=item.mime_type,
+                            size_bytes=item.size_bytes,
+                            created_at=bundle.created_at,
+                            location=item.location,
+                            people=item.people,
+                            folder_path=folder,
+                            summary=bundle.message,
+                            download_url=item.download_url,
+                            thumbnail_url=item.thumbnail_url,
+                        )
+                    assets.append(asset)
+                    received_at[asset.id] = bundle.created_at
+
+        if not query.strip():
+            assets.sort(key=lambda asset: received_at.get(asset.id, asset.created_at), reverse=True)
+        hits = self._rank_assets(assets, query, limit)
+        for hit in hits:
+            if hit.asset.id in received_at:
+                sender = f"Received from {hit.asset.owner_name}"
+                hit.match_reason = sender if hit.match_reason == "Recent item" else f"{sender} • {hit.match_reason}"
+        return hits
+
+    def _rank_assets(self, assets: list[IndexedAsset], query: str, limit: int) -> list[SearchHit]:
         q_clean = query.strip()
         if not q_clean:
             return [SearchHit(asset=a, score=1.0, match_reason="Recent item") for a in assets[:limit]]
@@ -412,7 +479,7 @@ class FydeStorage:
     def list_received_bundles(self, user_id: str) -> list[TransferBundle]:
         with self._conn() as conn:
             rows = conn.execute(
-                "SELECT data FROM bundles WHERE recipient_id = ? ORDER BY created_at DESC",
+                "SELECT data FROM bundles WHERE recipient_id = ? ORDER BY created_at DESC, rowid DESC",
                 (user_id,),
             ).fetchall()
         return [TransferBundle.model_validate_json(r["data"]) for r in rows]
@@ -463,10 +530,10 @@ class FydeStorage:
     def list_chat_messages(self, user_id: str, limit: int = 80) -> list[ChatMessage]:
         with self._conn() as conn:
             rows = conn.execute(
-                "SELECT data FROM chat_messages WHERE user_id = ? ORDER BY created_at ASC LIMIT ?",
+                "SELECT data FROM chat_messages WHERE user_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?",
                 (user_id, limit),
             ).fetchall()
-        return [ChatMessage.model_validate_json(r["data"]) for r in rows]
+        return [ChatMessage.model_validate_json(r["data"]) for r in reversed(rows)]
 
     # ---------- Initial Demo Seed ----------
     def seed_if_empty(self) -> None:
